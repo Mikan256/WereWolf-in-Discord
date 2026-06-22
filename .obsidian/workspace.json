@@ -181,5 +181,7 @@
     }
   },
   "active": "fabf5eef25f8d458",
-  "lastOpenFiles": []
+  "lastOpenFiles": [
+    "src/utils/env.ts"
+  ]
 }
