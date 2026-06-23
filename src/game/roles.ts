@@ -1,15 +1,22 @@
 import { RoleType, Team } from "./types";
 
+const WEREWOLF_TEAM_ROLES = new Set([
+  RoleType.WEREWOLF, RoleType.ACCOMPLICE,
+  RoleType.MADMAN, RoleType.FANATIC, RoleType.BLACK_CAT,
+]);
+
+export function isTrueWerewolf(role: RoleType): boolean {
+  return role === RoleType.WEREWOLF;
+}
+
+export function isCountedAsVillager(role: RoleType): boolean {
+  return WEREWOLF_TEAM_ROLES.has(role);
+}
+
 export function getTeam(role: RoleType): Team {
-  switch (role) {
-    case RoleType.WEREWOLF:
-    case RoleType.ACCOMPLICE:
-      return Team.WEREWOLF;
-    case RoleType.FOX:
-      return Team.THIRD;
-    default:
-      return Team.VILLAGER;
-  }
+  if (WEREWOLF_TEAM_ROLES.has(role)) return Team.WEREWOLF;
+  if (role === RoleType.FOX || role === RoleType.TERU_TERU) return Team.THIRD;
+  return Team.VILLAGER;
 }
 
 export function getRoleName(role: RoleType): string {
@@ -17,10 +24,15 @@ export function getRoleName(role: RoleType): string {
     [RoleType.VILLAGER]: "市民",
     [RoleType.WEREWOLF]: "人狼",
     [RoleType.ACCOMPLICE]: "共犯者",
+    [RoleType.MADMAN]: "狂人",
+    [RoleType.FANATIC]: "狂信者",
     [RoleType.FOX]: "妖狐",
     [RoleType.FORTUNE_TELLER]: "占い師",
     [RoleType.MEDIUM]: "霊媒師",
     [RoleType.KNIGHT]: "騎士",
+    [RoleType.TERU_TERU]: "てるてる坊主",
+    [RoleType.NEKOMATA]: "猫又",
+    [RoleType.BLACK_CAT]: "黒猫",
   };
   return names[role];
 }
@@ -33,6 +45,10 @@ export function getRoleDescription(role: RoleType): string {
       "あなたは人狼です。夜に他の人狼と相談して市民を襲撃しましょう。他の人狼メンバーが分かります。",
     [RoleType.ACCOMPLICE]:
       "あなたは共犯者です。人狼陣営ですが、人狼用チャンネルにはアクセスできません。誰が人狼か知ることができます。",
+    [RoleType.MADMAN]:
+      "あなたは狂人です。人狼陣営ですが、誰が人狼かは分かりません。人狼からもあなたが誰かは分かりません。",
+    [RoleType.FANATIC]:
+      "あなたは狂信者です。人狼陣営で、誰が人狼か分かります。人狼からもあなたが狂信者と把握されています。",
     [RoleType.FOX]:
       "あなたは妖狐です。人狼に襲われても死にませんが、占いや投票で死亡します。両陣営の勝負がついたとき生き残っていれば単独勝利します。",
     [RoleType.FORTUNE_TELLER]:
@@ -41,6 +57,12 @@ export function getRoleDescription(role: RoleType): string {
       "あなたは霊媒師です。夜に死亡したプレイヤーを一人選び、その陣営を確認できます。(共犯者は市民と表示)",
     [RoleType.KNIGHT]:
       "あなたは騎士です。夜に一人を選んで守護し、人狼の襲撃から守ります。",
+    [RoleType.TERU_TERU]:
+      "あなたはてるてる坊主です。会議の投票で死亡すると勝利します。それ以外の死に方や他陣営の勝利時は敗北します。",
+    [RoleType.NEKOMATA]:
+      "あなたは猫又です。投票で死亡した場合、ランダムに一人道連れにします。人狼に殺された場合、人狼からランダムに一人道連れにします。騎士の守護は無効です。",
+    [RoleType.BLACK_CAT]:
+      "あなたは黒猫です。投票で死亡した場合、人狼陣営を除いたプレイヤーからランダムに一人道連れにします。",
   };
   return descriptions[role];
 }

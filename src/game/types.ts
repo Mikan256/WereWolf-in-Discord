@@ -10,10 +10,15 @@ export enum RoleType {
   VILLAGER = "villager",
   WEREWOLF = "werewolf",
   ACCOMPLICE = "accomplice",
+  MADMAN = "madman",
+  FANATIC = "fanatic",
   FOX = "fox",
   FORTUNE_TELLER = "fortune_teller",
   MEDIUM = "medium",
   KNIGHT = "knight",
+  TERU_TERU = "teru_teru",
+  NEKOMATA = "nekomata",
+  BLACK_CAT = "black_cat",
 }
 
 export enum Team {
@@ -68,7 +73,7 @@ export const ROLE_DEFINITIONS: Record<RoleType, RoleInfo> = {
     name: "市民",
     team: Team.VILLAGER,
     description: "昼の時間にゲーム用のテキストチャンネルで会議をして投票を行います。",
-    winCondition: "人狼陣営が全員死亡すること。",
+    winCondition: "人狼陣営(共犯者/狂人/狂信者/黒猫以外の人狼陣営)が全員死亡すること。",
   },
   [RoleType.WEREWOLF]: {
     type: RoleType.WEREWOLF,
@@ -86,6 +91,22 @@ export const ROLE_DEFINITIONS: Record<RoleType, RoleInfo> = {
       "昼に議論の場をかき乱します。誰が人狼なのかを知ることができますが、人狼からは誰が共犯者なのかはわかりません。",
     winCondition: "市民陣営の数が人狼陣営の数の同数以下になること。",
   },
+  [RoleType.MADMAN]: {
+    type: RoleType.MADMAN,
+    name: "狂人",
+    team: Team.WEREWOLF,
+    description:
+      "昼に議論の場をかき乱します。誰が人狼なのかを知ることはできず、人狼からも誰が狂人なのかはわかりません。",
+    winCondition: "市民陣営の数が人狼陣営の数の同数以下になること。",
+  },
+  [RoleType.FANATIC]: {
+    type: RoleType.FANATIC,
+    name: "狂信者",
+    team: Team.WEREWOLF,
+    description:
+      "昼に議論の場をかき乱します。誰が人狼なのかがわかるし、人狼からも誰が狂信者かは把握できます。",
+    winCondition: "市民陣営の数が人狼陣営の数の同数以下になること。",
+  },
   [RoleType.FOX]: {
     type: RoleType.FOX,
     name: "妖狐",
@@ -101,7 +122,7 @@ export const ROLE_DEFINITIONS: Record<RoleType, RoleInfo> = {
     team: Team.VILLAGER,
     description:
       "夜の時間にプレイヤーをひとり選んで占い、その役職の陣営を把握できます。(共犯者は市民陣営と表示されます)",
-    winCondition: "人狼陣営が全員死亡すること。",
+    winCondition: "人狼陣営(共犯者/狂人/狂信者/黒猫以外の人狼陣営)が全員死亡すること。",
   },
   [RoleType.MEDIUM]: {
     type: RoleType.MEDIUM,
@@ -109,7 +130,7 @@ export const ROLE_DEFINITIONS: Record<RoleType, RoleInfo> = {
     team: Team.VILLAGER,
     description:
       "夜の時間にプレイヤーを一人選び、そのプレイヤーがすでに死んでいた場合、その役職の陣営を把握できます。(共犯者は市民陣営と表示されます)",
-    winCondition: "人狼陣営が全員死亡すること。",
+    winCondition: "人狼陣営(共犯者/狂人/狂信者/黒猫以外の人狼陣営)が全員死亡すること。",
   },
   [RoleType.KNIGHT]: {
     type: RoleType.KNIGHT,
@@ -117,6 +138,30 @@ export const ROLE_DEFINITIONS: Record<RoleType, RoleInfo> = {
     team: Team.VILLAGER,
     description:
       "夜の時間にプレイヤーを一人選び、そのプレイヤーを守護します。守護されたプレイヤーは人狼に殺されるのを回避できます。",
-    winCondition: "人狼陣営が全員死亡すること。",
+    winCondition: "人狼陣営(共犯者/狂人/狂信者/黒猫以外の人狼陣営)が全員死亡すること。",
+  },
+  [RoleType.TERU_TERU]: {
+    type: RoleType.TERU_TERU,
+    name: "てるてる坊主",
+    team: Team.THIRD,
+    description:
+      "会議の投票によって死亡したら勝利します。それ以外の勝利か他陣営が勝利したときは敗北します。",
+    winCondition: "他陣営の勝敗が決まる前に会議の投票で死亡すること。",
+  },
+  [RoleType.NEKOMATA]: {
+    type: RoleType.NEKOMATA,
+    name: "猫又",
+    team: Team.VILLAGER,
+    description:
+      "会議の投票によって死亡した場合は全プレイヤーの中からランダムに一人道連れにします。人狼によって殺された場合は人狼の中から一人をランダムに道連れにします。(騎士による守りは発動不可)",
+    winCondition: "人狼陣営(共犯者/狂人/狂信者/黒猫以外の人狼陣営)が全員死亡すること。",
+  },
+  [RoleType.BLACK_CAT]: {
+    type: RoleType.BLACK_CAT,
+    name: "黒猫",
+    team: Team.WEREWOLF,
+    description:
+      "会議の投票によって死亡した場合は人狼陣営を除いたプレイヤーの中からランダムに一人道連れにします。(騎士による守りは発動不可)",
+    winCondition: "市民陣営の数が人狼陣営の数の同数以下になること。",
   },
 };

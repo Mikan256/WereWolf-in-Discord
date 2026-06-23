@@ -12,9 +12,10 @@ export async function execute(
   interaction: ChatInputCommandInteraction,
   gameManager: GameManager
 ) {
+  await interaction.deferReply();
   const result = await gameManager.stopGame(
     interaction.guildId!,
     interaction.user.id
   );
-  await interaction.reply(result);
+  await interaction.editReply(result);
 }

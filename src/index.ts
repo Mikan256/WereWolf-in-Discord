@@ -3,8 +3,9 @@ import {
   GatewayIntentBits,
   Events,
   Collection,
-  ChatInputCommandInteraction,
 } from "discord.js";
+
+const EPHEMERAL = 64;
 import { config } from "dotenv";
 config();
 
@@ -12,10 +13,12 @@ import { TOKEN } from "./utils/env";
 import { GameManager } from "./game/GameManager";
 
 import * as settingCommand from "./commands/setting";
+import * as settingStatusCommand from "./commands/settingStatus";
 import * as startCommand from "./commands/start";
 import * as stopCommand from "./commands/stop";
 import * as skipCommand from "./commands/skip";
 import * as endCommand from "./commands/end";
+import * as helpCommand from "./commands/help";
 
 const client = new Client({
   intents: [
@@ -32,10 +35,12 @@ const gameManager = new GameManager(client);
 
 const commands = new Collection<string, any>();
 commands.set(settingCommand.data.name, settingCommand);
+commands.set(settingStatusCommand.data.name, settingStatusCommand);
 commands.set(startCommand.data.name, startCommand);
 commands.set(stopCommand.data.name, stopCommand);
 commands.set(skipCommand.data.name, skipCommand);
 commands.set(endCommand.data.name, endCommand);
+commands.set(helpCommand.data.name, helpCommand);
 
 client.once(Events.ClientReady, (c) => {
   console.log(`${c.user.tag} としてログインしました！`);
@@ -45,10 +50,7 @@ client.once(Events.ClientReady, (c) => {
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   if (!interaction.guildId) {
-    await interaction.reply({
-      content: "このコマンドはサーバー内でのみ使用できます。",
-      ephemeral: true,
-    });
+    await interaction.reply({ content: "このコマンドはサーバー内でのみ使用できます。", flags: EPHEMERAL });
     return;
   }
 
@@ -59,14 +61,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await command.execute(interaction, gameManager);
   } catch (error) {
     console.error(error);
-    const reply = {
-      content: "コマンド実行中にエラーが発生しました。",
-      ephemeral: true,
-    };
     if (interaction.replied || interaction.deferred) {
-      await interaction.followUp(reply);
-    } else {
-      await interaction.reply(reply);
+      await interaction.editReply({ content: "コマンド実行中にエラーが発生しました。", components: [] }).catch(() => {});
+    } else if (!interaction.replied) {
+      await interaction.reply({ content: "コマンド実行中にエラーが発生しました。", flags: EPHEMERAL }).catch(() => {});
     }
   }
 });

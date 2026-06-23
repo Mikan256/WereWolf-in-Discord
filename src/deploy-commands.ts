@@ -10,36 +10,22 @@ const commands = [
   new SlashCommandBuilder()
     .setName("setting")
     .setDescription("対話形式で設定を決める(ホストのみ)")
-    .addStringOption((option) =>
-      option
-        .setName("参加者")
-        .setDescription("参加者のメンション (例: @user1 @user2)")
-        .setRequired(true)
-    )
-    .addIntegerOption((option) =>
-      option.setName("人狼").setDescription("人狼の数").setRequired(true)
-    )
-    .addIntegerOption((option) =>
-      option.setName("共犯者").setDescription("共犯者の数").setRequired(true)
-    )
-    .addIntegerOption((option) =>
-      option.setName("妖狐").setDescription("妖狐の数").setRequired(true)
-    )
-    .addIntegerOption((option) =>
-      option.setName("占い師").setDescription("占い師の数").setRequired(true)
-    )
-    .addIntegerOption((option) =>
-      option.setName("霊媒師").setDescription("霊媒師の数").setRequired(true)
-    )
-    .addIntegerOption((option) =>
-      option.setName("騎士").setDescription("騎士の数").setRequired(true)
-    )
-    .addIntegerOption((option) =>
-      option
-        .setName("会議時間")
-        .setDescription("会議時間(分)")
-        .setRequired(true)
-    ),
+    .addStringOption((o) => o.setName("参加者").setDescription("参加者のメンション (省略で対話モード)").setRequired(false))
+    .addIntegerOption((o) => o.setName("人狼").setDescription("人狼の数").setRequired(false).setMinValue(1).setMaxValue(5))
+    .addIntegerOption((o) => o.setName("共犯者").setDescription("共犯者の数").setRequired(false).setMinValue(0).setMaxValue(3))
+    .addIntegerOption((o) => o.setName("狂人").setDescription("狂人の数").setRequired(false).setMinValue(0).setMaxValue(3))
+    .addIntegerOption((o) => o.setName("狂信者").setDescription("狂信者の数").setRequired(false).setMinValue(0).setMaxValue(3))
+    .addIntegerOption((o) => o.setName("妖狐").setDescription("妖狐の数").setRequired(false).setMinValue(0).setMaxValue(2))
+    .addIntegerOption((o) => o.setName("占い師").setDescription("占い師の数").setRequired(false).setMinValue(0).setMaxValue(2))
+    .addIntegerOption((o) => o.setName("霊媒師").setDescription("霊媒師の数").setRequired(false).setMinValue(0).setMaxValue(2))
+    .addIntegerOption((o) => o.setName("騎士").setDescription("騎士の数").setRequired(false).setMinValue(0).setMaxValue(2))
+    .addIntegerOption((o) => o.setName("てるてる坊主").setDescription("てるてる坊主の数").setRequired(false).setMinValue(0).setMaxValue(1))
+    .addIntegerOption((o) => o.setName("猫又").setDescription("猫又の数").setRequired(false).setMinValue(0).setMaxValue(2))
+    .addIntegerOption((o) => o.setName("黒猫").setDescription("黒猫の数").setRequired(false).setMinValue(0).setMaxValue(2))
+    .addIntegerOption((o) => o.setName("会議時間").setDescription("会議時間(分)").setRequired(false).setMinValue(1).setMaxValue(30)),
+  new SlashCommandBuilder()
+    .setName("setting-status")
+    .setDescription("現在の設定を確認する"),
   new SlashCommandBuilder()
     .setName("start")
     .setDescription("ゲームを開始する(ホストのみ)"),
@@ -52,6 +38,13 @@ const commands = [
   new SlashCommandBuilder()
     .setName("end")
     .setDescription("試合終了後に初期化を行う"),
+  new SlashCommandBuilder()
+    .setName("help")
+    .setDescription("コマンド一覧と説明を見る。役職ごとの説明も読めます。")
+    .addStringOption((o) =>
+      o.setName("項目").setDescription("表示する項目")
+        .addChoices({ name: "役職一覧", value: "roles" })
+    ),
 ].map((cmd) => cmd.toJSON());
 
 const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -59,17 +52,11 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
 (async () => {
   try {
     console.log("スラッシュコマンドを登録中...");
-
     if (GUILD_ID) {
-      await rest.put(
-        Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-        { body: commands }
-      );
+      await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
       console.log(`ギルドコマンドを登録しました (${GUILD_ID})`);
     } else {
-      await rest.put(Routes.applicationCommands(CLIENT_ID), {
-        body: commands,
-      });
+      await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
       console.log("グローバルコマンドを登録しました");
     }
   } catch (error) {
