@@ -351,6 +351,16 @@ export class GameManager {
       time: 60000,
     });
 
+    let voteResolve: (() => void) | null = null;
+    const tryResolveVote = () => {
+      if (!voteResolve) return;
+      if (alivePlayers.every((p) => game.votes.has(p))) {
+        collector.stop();
+        voteResolve();
+        voteResolve = null;
+      }
+    };
+
     collector.on("collect", async (i) => {
       if (i.customId === "vote_open") {
         const current = game.votes.get(i.user.id);
@@ -382,13 +392,20 @@ export class GameManager {
           game.votes.set(i.user.id, target);
           await i.update({ content: `あなたは **<@${target}>** に投票しました。`, components: [] });
         }
+        tryResolveVote();
       }
     });
 
-    setTimeout(async () => {
-      collector.stop();
-      await this.processVotingResults(guild, game);
-    }, 60000);
+    await new Promise<void>((resolve) => {
+      voteResolve = resolve;
+      setTimeout(() => {
+        collector.stop();
+        if (voteResolve) { voteResolve(); voteResolve = null; }
+      }, 60000);
+    });
+
+    collector.stop();
+    await this.processVotingResults(guild, game);
   }
 
   private async processVotingResults(guild: Guild, game: GameState): Promise<void> {
@@ -584,6 +601,17 @@ export class GameManager {
       time: 30000,
     });
 
+    let runoffResolve: (() => void) | null = null;
+    const tryResolveRunoff = () => {
+      if (!runoffResolve) return;
+      if (alivePlayers.every((p) => game.votes.has(p))) {
+        collector.stop();
+        selectCollector.stop();
+        runoffResolve();
+        runoffResolve = null;
+      }
+    };
+
     selectCollector.on("collect", async (i) => {
       if (!i.isStringSelectMenu()) return;
       const target = i.values[0];
@@ -594,59 +622,64 @@ export class GameManager {
         game.votes.set(i.user.id, target);
         await i.update({ content: `あなたは **<@${target}>** に投票しました。`, components: [] });
       }
+      tryResolveRunoff();
     });
 
-    setTimeout(async () => {
-      collector.stop();
-      selectCollector.stop();
-      const alivePlayers = game.participants.filter((p) => game.players.get(p)?.isAlive);
-      const abstainCount = [...game.votes.values()].filter((v) => v === null).length;
-      if (abstainCount > alivePlayers.length / 2) {
-        await gameChannel.send(`決選投票で過半数（${abstainCount}人）が棄権したため、投票は無効となりました。明日へ続きます。`);
-        await this.startNight(guild, game);
-        return;
-      }
+    await new Promise<void>((resolve) => {
+      runoffResolve = resolve;
+      setTimeout(async () => {
+        collector.stop();
+        selectCollector.stop();
+        if (runoffResolve) { runoffResolve(); runoffResolve = null; }
+      }, 30000);
+    });
 
-      const voteCount = new Map<string, number>();
-      for (const [, target] of game.votes) {
-        if (target !== null) voteCount.set(target, (voteCount.get(target) || 0) + 1);
-      }
-
-      if (voteCount.size === 0) {
-        await gameChannel.send("決選投票でも決着がつきませんでした。明日へ続きます。");
-        await this.startNight(guild, game);
-        return;
-      }
-
-      let runoffResult = "**決選投票結果:**\n";
-      if (game.settings.anonymousVoting) {
-        for (const [pid, c] of voteCount) runoffResult += `<@${pid}>: ${c}票\n`;
-        if (abstainCount > 0) runoffResult += `棄権: ${abstainCount}人\n`;
-      } else {
-        for (const pid of alivePlayers) {
-          const vote = game.votes.get(pid);
-          runoffResult += `<@${pid}> → ${vote !== null ? `<@${vote}>` : "棄権"}\n`;
-        }
-      }
-      await gameChannel.send(runoffResult);
-
-      const maxVotes = Math.max(...voteCount.values());
-      const mostVoted: string[] = [];
-      for (const [pid, count] of voteCount) { if (count === maxVotes) mostVoted.push(pid); }
-
-      const eliminated = mostVoted[0];
-      await this.handleElimination(guild, game, eliminated, "vote");
-      if (game.phase === GamePhase.FINISHED) return;
-
-      const specChannel = guild.channels.cache.get(game.spectatorTextChannelId!) as TextChannel;
-      if (specChannel) {
-        await specChannel.send(`**${game.dayCount}日目 決選投票結果:** <@${eliminated}> が追放されました。（役職: ${getRoleName(game.players.get(eliminated)!.role)}）`);
-      }
-
-      game.votes.clear();
-      if (this.checkWinCondition(game)) return;
+    const abstainCount = [...game.votes.values()].filter((v) => v === null).length;
+    if (abstainCount > alivePlayers.length / 2) {
+      await gameChannel.send(`決選投票で過半数（${abstainCount}人）が棄権したため、投票は無効となりました。明日へ続きます。`);
       await this.startNight(guild, game);
-    }, 30000);
+      return;
+    }
+
+    const voteCount = new Map<string, number>();
+    for (const [, target] of game.votes) {
+      if (target !== null) voteCount.set(target, (voteCount.get(target) || 0) + 1);
+    }
+
+    if (voteCount.size === 0) {
+      await gameChannel.send("決選投票でも決着がつきませんでした。明日へ続きます。");
+      await this.startNight(guild, game);
+      return;
+    }
+
+    let runoffResult = "**決選投票結果:**\n";
+    if (game.settings.anonymousVoting) {
+      for (const [pid, c] of voteCount) runoffResult += `<@${pid}>: ${c}票\n`;
+      if (abstainCount > 0) runoffResult += `棄権: ${abstainCount}人\n`;
+    } else {
+      for (const pid of alivePlayers) {
+        const vote = game.votes.get(pid);
+        runoffResult += `<@${pid}> → ${vote !== null ? `<@${vote}>` : "棄権"}\n`;
+      }
+    }
+    await gameChannel.send(runoffResult);
+
+    const maxVotes = Math.max(...voteCount.values());
+    const mostVoted: string[] = [];
+    for (const [pid, count] of voteCount) { if (count === maxVotes) mostVoted.push(pid); }
+
+    const eliminated = mostVoted[0];
+    await this.handleElimination(guild, game, eliminated, "vote");
+    if (game.phase === GamePhase.FINISHED) return;
+
+    const specChannel = guild.channels.cache.get(game.spectatorTextChannelId!) as TextChannel;
+    if (specChannel) {
+      await specChannel.send(`**${game.dayCount}日目 決選投票結果:** <@${eliminated}> が追放されました。（役職: ${getRoleName(game.players.get(eliminated)!.role)}）`);
+    }
+
+    game.votes.clear();
+    if (this.checkWinCondition(game)) return;
+    await this.startNight(guild, game);
   }
 
   private async startNight(guild: Guild, game: GameState): Promise<void> {
@@ -737,10 +770,28 @@ export class GameManager {
       });
     });
 
+    const nightRolePlayers = alivePlayers.filter((p) => {
+      const r = game.players.get(p)?.role;
+      return r === RoleType.KNIGHT || r === RoleType.FORTUNE_TELLER || r === RoleType.MEDIUM || r === RoleType.WEREWOLF;
+    });
+
     const selectCollector = gameChannel.createMessageComponentCollector({
       filter: (i) => i.customId === "night_action_select" && alivePlayers.includes(i.user.id),
       time: 85000,
     });
+
+    let nightResolve: (() => void) | null = null;
+    const tryResolveNight = () => {
+      if (!nightResolve) return;
+      const actedUsers = new Set(game.nightActionResult.map((a) => a.split(":")[1]));
+      const werewolfActed = game.nightActionResult.some((a) => a.startsWith("werewolf:"));
+      const allDone = nightRolePlayers.every((pid) => {
+        const r = game.players.get(pid)?.role;
+        if (r === RoleType.WEREWOLF) return werewolfActed;
+        return actedUsers.has(pid);
+      });
+      if (allDone) { nightResolve(); nightResolve = null; }
+    };
 
     selectCollector.on("collect", async (i) => {
       if (!i.isStringSelectMenu()) return;
@@ -756,16 +807,21 @@ export class GameManager {
       const targetId = i.values[0];
       const resultMsg = this.recordNightAction(game.guildId, i.user.id, targetId, role);
       await i.update({ content: resultMsg, components: [] });
+      tryResolveNight();
     });
 
     await new Promise<void>((resolve) => {
+      nightResolve = resolve;
       if (game.nightActionTimeout) clearTimeout(game.nightActionTimeout);
-      game.nightActionTimeout = setTimeout(resolve, 90000);
+      game.nightActionTimeout = setTimeout(() => {
+        log(guild.id, `Night ${game.dayCount} timeout expired (90s)`);
+        if (nightResolve) { nightResolve(); nightResolve = null; }
+      }, 90000);
     });
 
     btnCollector.stop();
     selectCollector.stop();
-    log(guild.id, `Night actions timeout, finalizing night ${game.dayCount}`);
+    log(guild.id, `Night ${game.dayCount} actions complete, finalizing`);
     await this.finalizeNight(guild, game);
   }
 
@@ -846,8 +902,11 @@ export class GameManager {
         return !game.players.get(targetId)?.isAlive
           ? `**<@${targetId}>** は死亡しています。陣営: **${getFortuneResult(game.players.get(targetId)!.role)}**`
           : `**<@${targetId}>** は生存しています。`;
-      case RoleType.WEREWOLF:
-        return `**<@${targetId}>** を襲撃対象に選びました。`;
+      case RoleType.WEREWOLF: {
+        const aliveWolfCount = game.participants.filter((p) => game.players.get(p)?.role === RoleType.WEREWOLF && game.players.get(p)?.isAlive).length;
+        const extra = aliveWolfCount > 1 ? "\n（複数の人狼がいる場合、最後に選択した人の対象が襲撃されます）" : "";
+        return `**<@${targetId}>** を襲撃対象に選びました。${extra}`;
+      }
       default:
         return "アクションを記録しました。";
     }
