@@ -182,16 +182,16 @@
   },
   "active": "fabf5eef25f8d458",
   "lastOpenFiles": [
-    "dist/commands/help.d.ts",
-    "dist/commands/help.d.ts.map",
-    "dist/commands/help.js",
-    "dist/commands/help.js.map",
-    "dist/commands/settingStatus.d.ts",
-    "dist/commands/settingStatus.d.ts.map",
-    "dist/commands/settingStatus.js",
-    "dist/commands/settingStatus.js.map",
-    "src/commands/help.ts",
-    "src/commands/settingStatus.ts",
-    "src/utils/env.ts"
+    "dist/commands/act.d.ts",
+    "dist/commands/act.d.ts.map",
+    "dist/commands/act.js",
+    "dist/commands/act.js.map",
+    "dist/commands/myrole.d.ts",
+    "dist/commands/myrole.d.ts.map",
+    "dist/commands/myrole.js",
+    "dist/commands/myrole.js.map",
+    "src/commands/act.ts",
+    "src/commands/myrole.ts",
+    "data/settings.json"
   ]
 }

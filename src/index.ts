@@ -11,6 +11,7 @@ config();
 
 import { TOKEN } from "./utils/env";
 import { GameManager } from "./game/GameManager";
+import { PersistenceManager } from "./utils/persistence";
 
 import * as settingCommand from "./commands/setting";
 import * as settingStatusCommand from "./commands/settingStatus";
@@ -31,7 +32,8 @@ const client = new Client({
   ],
 });
 
-const gameManager = new GameManager(client);
+const persistence = new PersistenceManager("data/settings.json");
+const gameManager = new GameManager(client, persistence);
 
 const commands = new Collection<string, any>();
 commands.set(settingCommand.data.name, settingCommand);

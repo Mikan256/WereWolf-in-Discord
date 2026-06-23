@@ -10,7 +10,7 @@ export function isTrueWerewolf(role: RoleType): boolean {
 }
 
 export function isCountedAsVillager(role: RoleType): boolean {
-  return WEREWOLF_TEAM_ROLES.has(role);
+  return role !== RoleType.WEREWOLF && WEREWOLF_TEAM_ROLES.has(role);
 }
 
 export function getTeam(role: RoleType): Team {

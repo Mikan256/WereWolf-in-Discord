@@ -28,15 +28,23 @@ import {
   isTrueWerewolf,
   isCountedAsVillager,
 } from "./roles";
+import { PersistenceManager, PersistedSettings } from "../utils/persistence";
 
 const EPHEMERAL = 64;
+
+function log(guildId: string, msg: string): void {
+  console.log(`[Game ${guildId.slice(0, 8)}] ${msg}`);
+}
 
 export class GameManager {
   private games: Map<string, GameState> = new Map();
   private client: Client;
+  private persistence: PersistenceManager;
 
-  constructor(client: Client) {
+  constructor(client: Client, persistence: PersistenceManager) {
     this.client = client;
+    this.persistence = persistence;
+    console.log("[Bot] GameManager initialized");
   }
 
   getGame(guildId: string): GameState | undefined {
@@ -44,11 +52,16 @@ export class GameManager {
   }
 
   createGame(guildId: string, hostUserId: string): GameState {
+    const persisted = this.persistence.getSettings(guildId);
+    const settings = persisted
+      ? { meetingTimeMinutes: persisted.meetingTimeMinutes, roleDistribution: { ...persisted.roleDistribution } }
+      : { meetingTimeMinutes: 3, roleDistribution: {} };
+
     const game: GameState = {
       guildId, hostUserId,
       phase: GamePhase.WAITING,
-      settings: { meetingTimeMinutes: 3, roleDistribution: {} },
-      players: new Map(), participants: [], dayCount: 0,
+      settings,
+      players: new Map(), participants: persisted?.participants ?? [], dayCount: 0,
       gameTextChannelId: null, gameVoiceChannelId: null,
       werewolfTextChannelId: null, spectatorTextChannelId: null,
       waitingVoiceChannelId: null,
@@ -56,10 +69,14 @@ export class GameManager {
       meetingTimer: null, nightActionTimeout: null,
     };
     this.games.set(guildId, game);
+    log(guildId, `Game created by <${hostUserId}>, settings loaded from persistence: ${!!persisted}`);
     return game;
   }
 
-  deleteGame(guildId: string): void { this.games.delete(guildId); }
+  deleteGame(guildId: string): void {
+    log(guildId, "Game state deleted from memory");
+    this.games.delete(guildId);
+  }
 
   async setSetting(
     guildId: string, hostUserId: string, participants: string[],
@@ -90,6 +107,16 @@ export class GameManager {
     ];
     for (const [c, r] of entries) { if (c > 0) game.settings.roleDistribution[r] = c; }
     game.settings.meetingTimeMinutes = meetingTimeMinutes;
+
+    log(guildId, `Settings updated: participants=${participants.length}, roles=${JSON.stringify(game.settings.roleDistribution)}, meetingTime=${meetingTimeMinutes}min`);
+
+    this.persistence.setSettings(guildId, {
+      hostUserId,
+      participants,
+      roleDistribution: { ...game.settings.roleDistribution },
+      meetingTimeMinutes,
+    });
+
     return "設定が完了しました。`/start` でゲームを開始できます。";
   }
 
@@ -99,6 +126,7 @@ export class GameManager {
     if (game.hostUserId !== userId) return "ホストのみがゲームを開始できます。";
     if (game.phase !== GamePhase.WAITING) return "すでにゲームが開始されています。";
     if (game.participants.length < 4) return "最低4人以上の参加者が必要です。";
+    log(guildId, `Host <${userId}> starting game with ${game.participants.length} players`);
 
     const guild = this.client.guilds.cache.get(guildId);
     if (!guild) return "ギルドが見つかりません。";
@@ -116,11 +144,35 @@ export class GameManager {
 
       const werewolfIds = game.participants.filter((p) => game.players.get(p)!.role === RoleType.WEREWOLF);
 
-      if (werewolfIds.length > 0) {
-        const wwChannel = guild.channels.cache.get(game.werewolfTextChannelId!) as TextChannel;
-        if (wwChannel) {
-          const names = werewolfIds.map((id) => `<@${id}>`).join(", ");
-          await wwChannel.send(`**人狼メンバー**: ${names}\n夜になったらここで襲撃する相手を相談してください。`);
+      const wwChannel = game.werewolfTextChannelId
+        ? (guild.channels.cache.get(game.werewolfTextChannelId) as TextChannel | undefined) : undefined;
+
+      if (wwChannel) {
+        for (const wid of werewolfIds) {
+          await wwChannel.permissionOverwrites.create(wid, { ViewChannel: true, SendMessages: false });
+        }
+      }
+
+      if (werewolfIds.length > 0 && wwChannel) {
+        const names = werewolfIds.map((id) => `<@${id}>`).join(", ");
+        await wwChannel.send(`**人狼メンバー**: ${names}\n夜になったらここで襲撃する相手を相談してください。`);
+      }
+
+      if (game.waitingVoiceChannelId) {
+        const waitingVC = guild.channels.cache.get(game.waitingVoiceChannelId) as VoiceChannel | undefined;
+        if (waitingVC) {
+          const specChannelId = game.spectatorTextChannelId;
+          for (const member of [...waitingVC.members.values()]) {
+            if (!game.participants.includes(member.id)) {
+              try { await member.voice.setMute(true); } catch {}
+              if (specChannelId) {
+                const specCh = guild.channels.cache.get(specChannelId) as TextChannel | undefined;
+                if (specCh) {
+                  try { await specCh.permissionOverwrites.create(member.id, { ViewChannel: true, SendMessages: true }); } catch {}
+                }
+              }
+            }
+          }
         }
       }
 
@@ -135,6 +187,8 @@ export class GameManager {
       }
 
       game.dayCount = 1;
+
+      log(guildId, `Game started with ${game.participants.length} players`);
       await this.startDayDiscussion(guild, game);
       return "ゲームを開始しました！";
     } catch (error) {
@@ -194,71 +248,41 @@ export class GameManager {
       name: "人狼用テキスト", type: ChannelType.GuildText, parent: category.id,
       permissionOverwrites: [{ id: everyone.id, deny: ["ViewChannel"], type: OverwriteType.Role }],
     });
-    const werewolfIds = game.participants.filter((p) => game.players.get(p)?.role === RoleType.WEREWOLF);
-    for (const wid of werewolfIds) {
-      await werewolfText.permissionOverwrites.create(wid, { ViewChannel: true, SendMessages: false });
-    }
 
     game.gameTextChannelId = gameText.id;
     game.gameVoiceChannelId = gameVoice.id;
     game.werewolfTextChannelId = werewolfText.id;
     game.spectatorTextChannelId = spectatorText.id;
+    log(guild.id, `Channels created: text=${gameText.id}, voice=${gameVoice.id}, ww=${werewolfText.id}, spec=${spectatorText.id}`);
   }
 
   private async sendRoleMessages(guild: Guild, game: GameState): Promise<void> {
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
 
-    const werewolfIds = game.participants.filter((p) => game.players.get(p)!.role === RoleType.WEREWOLF);
-    const accompliceIds = game.participants.filter((p) => game.players.get(p)!.role === RoleType.ACCOMPLICE);
-    const fanaticIds = game.participants.filter((p) => game.players.get(p)!.role === RoleType.FANATIC);
-
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      ...game.participants.map((pid) =>
-        new ButtonBuilder()
-          .setCustomId(`reveal_${pid}`)
-          .setLabel(`${guild.members.cache.get(pid)?.displayName ?? pid} の役職`)
-          .setStyle(ButtonStyle.Secondary)
-      ),
+      new ButtonBuilder()
+        .setCustomId("reveal_my_role")
+        .setLabel("自分の役職を確認する")
+        .setStyle(ButtonStyle.Secondary),
     );
 
-    const msg = await gameChannel.send({
-      content: "**役職を確認するには、自分の名前のボタンをクリックしてください。**\n（クリックするとあなただけに見える形で役職が表示されます）",
+    await gameChannel.send({
+      content: "**役職を確認するには、下のボタンをクリックしてください。**\n（クリックするとあなただけに見える形で役職が表示されます）",
       components: [row],
     });
 
     const collector = gameChannel.createMessageComponentCollector({
-      filter: (i) => i.customId.startsWith("reveal_") && game.participants.includes(i.user.id),
+      filter: (i) => i.customId === "reveal_my_role" && game.participants.includes(i.user.id),
       time: 120000,
     });
 
     collector.on("collect", async (i) => {
-      const pid = i.customId.replace("reveal_", "");
-      if (pid !== i.user.id) {
-        await i.reply({ content: "他の人の役職は確認できません。", flags: EPHEMERAL });
+      const msg = this.getMyRole(game.guildId, i.user.id);
+      if (!msg) {
+        await i.reply({ content: "役職情報が見つかりません。", flags: EPHEMERAL });
         return;
       }
-
-      const ps = game.players.get(pid)!;
-      const def = ROLE_DEFINITIONS[ps.role];
-
-      let extra = "";
-      if (ps.role === RoleType.WEREWOLF && werewolfIds.length > 0) {
-        extra += `\n\n**他の人狼**: ${werewolfIds.filter((id) => id !== pid).map((id) => `<@${id}>`).join(", ")}`;
-      }
-      if (ps.role === RoleType.WEREWOLF && fanaticIds.length > 0) {
-        extra += `\n\n**狂信者**: ${fanaticIds.map((id) => `<@${id}>`).join(", ")}`;
-      }
-      if (ps.role === RoleType.FANATIC && werewolfIds.length > 0) {
-        extra += `\n\n**人狼メンバー**: ${werewolfIds.map((id) => `<@${id}>`).join(", ")}`;
-      }
-      if (ps.role === RoleType.ACCOMPLICE && werewolfIds.length > 0) {
-        extra += `\n\n**人狼メンバー**: ${werewolfIds.map((id) => `<@${id}>`).join(", ")}`;
-      }
-
-      await i.reply({
-        content: `あなたの役職は **${def.name}** です！\n${def.description}\n勝利条件: ${def.winCondition}${extra}`,
-        flags: EPHEMERAL,
-      });
+      await i.reply({ content: msg, flags: EPHEMERAL });
     });
   }
 
@@ -266,7 +290,10 @@ export class GameManager {
     game.phase = GamePhase.DAY_DISCUSSION;
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
 
-    await gameChannel.send(`**${game.dayCount}日目の昼です！**\n会議を開始してください。（制限時間: ${game.settings.meetingTimeMinutes}分）`);
+    const dayMsg = game.dayCount === 1
+      ? `**${game.dayCount}日目の昼です！**\n会議を開始してください。（制限時間: ${game.settings.meetingTimeMinutes}分）\n※1日目は投票を行いません。`
+      : `**${game.dayCount}日目の昼です！**\n会議を開始してください。（制限時間: ${game.settings.meetingTimeMinutes}分）`;
+    await gameChannel.send(dayMsg);
 
     const wwChannel = game.werewolfTextChannelId
       ? (guild.channels.cache.get(game.werewolfTextChannelId) as TextChannel | undefined) : undefined;
@@ -275,7 +302,14 @@ export class GameManager {
     }
 
     if (game.meetingTimer) clearTimeout(game.meetingTimer);
-    game.meetingTimer = setTimeout(async () => { await this.startVoting(guild, game); }, game.settings.meetingTimeMinutes * 60 * 1000);
+    game.meetingTimer = setTimeout(async () => {
+      if (game.dayCount === 1) {
+        log(guild.id, "Day 1: no voting, skipping to night");
+        await this.startNight(guild, game);
+      } else {
+        await this.startVoting(guild, game);
+      }
+    }, game.settings.meetingTimeMinutes * 60 * 1000);
 
     const gameVoice = guild.channels.cache.get(game.gameVoiceChannelId!) as VoiceChannel;
     if (gameVoice) {
@@ -289,8 +323,10 @@ export class GameManager {
   }
 
   private async startVoting(guild: Guild, game: GameState): Promise<void> {
+    log(guild.id, `Day ${game.dayCount} discussion started (${game.settings.meetingTimeMinutes}min)`);
     if (game.phase !== GamePhase.DAY_DISCUSSION) return;
     game.phase = GamePhase.DAY_VOTING;
+    log(guild.id, `Day ${game.dayCount} voting started`);
     game.votes.clear();
 
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
@@ -298,7 +334,7 @@ export class GameManager {
 
     const embed = new EmbedBuilder()
       .setTitle(`投票時間 - ${game.dayCount}日目`)
-      .setDescription("下のボタンをクリックして投票してください。")
+      .setDescription("下のボタンをクリックして投票してください。\n自分に投票することも、棄権することもできます。")
       .setColor(0xff0000);
 
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -314,37 +350,35 @@ export class GameManager {
 
     collector.on("collect", async (i) => {
       if (i.customId === "vote_open") {
+        const current = game.votes.get(i.user.id);
         const select = new StringSelectMenuBuilder()
-          .setCustomId(`vote_select`)
-          .setPlaceholder("投票先を選んでください")
+          .setCustomId("vote_target")
+          .setPlaceholder(current !== undefined ? "投票先を変更する" : "投票先を選んでください")
           .addOptions(
-            alivePlayers.filter((p) => p !== i.user.id).map((p) =>
+            new StringSelectMenuOptionBuilder().setLabel("棄権").setValue("abstain"),
+            ...alivePlayers.map((p) =>
               new StringSelectMenuOptionBuilder()
                 .setLabel(guild.members.cache.get(p)?.displayName ?? p)
                 .setValue(p)
             )
           );
+        const msg = current === undefined
+          ? "投票先を選んでください。（自分への投票も可能、棄権も選択できます）"
+          : `現在: ${current === null ? "棄権" : `<@${current}>`}\n変更する場合は選び直してください。`;
         await i.reply({
-          content: "追放したいプレイヤーを選んでください。",
+          content: msg,
           components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)],
           flags: EPHEMERAL,
         });
-      } else if (i.customId.startsWith("vote_")) {
-        const pid = i.customId.replace("vote_", "");
-        const current = game.votes.get(pid);
-        const select = new StringSelectMenuBuilder()
-          .setCustomId(`vote_select`)
-          .setPlaceholder(current ? `現在: ${guild.members.cache.get(current)?.displayName} (変更する)` : "投票先を選んでください")
-          .addOptions(
-            alivePlayers.filter((p) => p !== pid).map((p) =>
-              new StringSelectMenuOptionBuilder()
-                .setLabel(guild.members.cache.get(p)?.displayName ?? p)
-                .setValue(p)
-            )
-          );
-        await i.update({
-          components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)],
-        });
+      } else if (i.customId === "vote_target" && i.isStringSelectMenu()) {
+        const target = i.values[0];
+        if (target === "abstain") {
+          game.votes.set(i.user.id, null);
+          await i.update({ content: "あなたは **棄権** しました。", components: [] });
+        } else {
+          game.votes.set(i.user.id, target);
+          await i.update({ content: `あなたは **<@${target}>** に投票しました。`, components: [] });
+        }
       }
     });
 
@@ -364,11 +398,20 @@ export class GameManager {
       resultMsg += `<@${pid}> → ${vote ? `<@${vote}>` : "棄権"}\n`;
     }
 
+    const abstainCount = [...game.votes.values()].filter((v) => v === null).length;
+    if (abstainCount > alivePlayers.length / 2) {
+      await gameChannel.send(resultMsg + `\n過半数（${abstainCount}人）が棄権したため、投票は無効となりました。明日へ続きます。`);
+      await this.startNight(guild, game);
+      return;
+    }
+
     const voteCount = new Map<string, number>();
-    for (const [, target] of game.votes) voteCount.set(target, (voteCount.get(target) || 0) + 1);
+    for (const [, target] of game.votes) {
+      if (target !== null) voteCount.set(target, (voteCount.get(target) || 0) + 1);
+    }
 
     if (voteCount.size === 0) {
-      await gameChannel.send(resultMsg + "\n投票なし。明日へ続きます。");
+      await gameChannel.send(resultMsg + "\n有効投票なし。明日へ続きます。");
       await this.startNight(guild, game);
       return;
     }
@@ -397,11 +440,37 @@ export class GameManager {
     await this.startNight(guild, game);
   }
 
+  private async handlePlayerDeath(guild: Guild, game: GameState, playerId: string): Promise<void> {
+    const specChannel = game.spectatorTextChannelId
+      ? (guild.channels.cache.get(game.spectatorTextChannelId) as TextChannel | undefined) : undefined;
+    const gameTextChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
+
+    const role = game.players.get(playerId)?.role;
+    log(guild.id, `Player <${playerId}> died (role: ${role ? getRoleName(role) : "unknown"})`);
+
+    if (specChannel) {
+      try { await specChannel.permissionOverwrites.create(playerId, { ViewChannel: true, SendMessages: true }); } catch {}
+    }
+
+    try { await gameTextChannel.permissionOverwrites.edit(playerId, { SendMessages: false }); } catch {}
+
+    if (game.gameVoiceChannelId) {
+      const vc = guild.channels.cache.get(game.gameVoiceChannelId) as VoiceChannel | undefined;
+      if (vc) {
+        try {
+          const member = await guild.members.fetch(playerId);
+          if (member.voice.channelId === vc.id) await member.voice.setMute(true);
+        } catch {}
+      }
+    }
+  }
+
   private async handleElimination(guild: Guild, game: GameState, playerId: string, cause: "vote" | "werewolf"): Promise<void> {
     const ps = game.players.get(playerId);
     if (!ps) return;
     ps.isAlive = false;
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
+    await this.handlePlayerDeath(guild, game, playerId);
 
     if (cause === "vote") {
       await gameChannel.send(`**追放**: <@${playerId}> が追放されました。`);
@@ -413,6 +482,7 @@ export class GameManager {
 
   private async handleTeruTeruWin(guild: Guild, game: GameState, playerId: string): Promise<void> {
     game.phase = GamePhase.FINISHED;
+    await this.unlockAllChannels(guild, game);
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     let r = `**=== ゲーム終了 ===**\n\n**てるてる坊主の勝利！**\n<@${playerId}> が会議の投票で死亡し、単独勝利しました！\n\n**役職一覧:**\n`;
     for (const pid of game.participants) { const p = game.players.get(pid)!; r += `<@${pid}>: ${getRoleName(p.role)} (${p.isAlive ? "生存" : "死亡"})\n`; }
@@ -427,6 +497,7 @@ export class GameManager {
     if (alive.length === 0) return;
     const target = alive[Math.floor(Math.random() * alive.length)];
     game.players.get(target)!.isAlive = false;
+    await this.handlePlayerDeath(guild, game, target);
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     await gameChannel.send(`**猫又の道連れ**: <@${target}> が道連れにされました。`);
     const specChannel = guild.channels.cache.get(game.spectatorTextChannelId!) as TextChannel;
@@ -438,6 +509,7 @@ export class GameManager {
     if (alive.length === 0) return;
     const target = alive[Math.floor(Math.random() * alive.length)];
     game.players.get(target)!.isAlive = false;
+    await this.handlePlayerDeath(guild, game, target);
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     await gameChannel.send(`**猫又の呪い**: <@${target}> が道連れにされました。`);
     const specChannel = guild.channels.cache.get(game.spectatorTextChannelId!) as TextChannel;
@@ -449,6 +521,7 @@ export class GameManager {
     if (alive.length === 0) return;
     const target = alive[Math.floor(Math.random() * alive.length)];
     game.players.get(target)!.isAlive = false;
+    await this.handlePlayerDeath(guild, game, target);
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     await gameChannel.send(`**黒猫の道連れ**: <@${target}> が道連れにされました。`);
     const specChannel = guild.channels.cache.get(game.spectatorTextChannelId!) as TextChannel;
@@ -471,23 +544,58 @@ export class GameManager {
     });
 
     collector.on("collect", async (i) => {
+      const current = game.votes.get(i.user.id);
       const select = new StringSelectMenuBuilder()
-        .setCustomId(`runoff_select`)
-        .setPlaceholder("投票先を選んでください")
-        .addOptions(candidates.map((c) =>
-          new StringSelectMenuOptionBuilder().setLabel(guild.members.cache.get(c)?.displayName ?? c).setValue(c)
-        ));
+        .setCustomId("runoff_target")
+        .setPlaceholder(current !== undefined ? "投票先を変更する" : "投票先を選んでください")
+        .addOptions(
+          new StringSelectMenuOptionBuilder().setLabel("棄権").setValue("abstain"),
+          ...candidates.map((c) =>
+            new StringSelectMenuOptionBuilder().setLabel(guild.members.cache.get(c)?.displayName ?? c).setValue(c)
+          )
+        );
+      const msg = current === undefined
+        ? "追放したいプレイヤーを選んでください。（棄権も選択できます）"
+        : `現在: ${current === null ? "棄権" : `<@${current}>`}\n変更する場合は選び直してください。`;
       await i.reply({
-        content: "追放したいプレイヤーを選んでください。",
+        content: msg,
         components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)],
         flags: EPHEMERAL,
       });
     });
 
+    const selectCollector = gameChannel.createMessageComponentCollector({
+      filter: (i) => i.customId === "runoff_target" && alivePlayers.includes(i.user.id),
+      time: 30000,
+    });
+
+    selectCollector.on("collect", async (i) => {
+      if (!i.isStringSelectMenu()) return;
+      const target = i.values[0];
+      if (target === "abstain") {
+        game.votes.set(i.user.id, null);
+        await i.update({ content: "あなたは **棄権** しました。", components: [] });
+      } else {
+        game.votes.set(i.user.id, target);
+        await i.update({ content: `あなたは **<@${target}>** に投票しました。`, components: [] });
+      }
+    });
+
     setTimeout(async () => {
       collector.stop();
+      selectCollector.stop();
+      const alivePlayers = game.participants.filter((p) => game.players.get(p)?.isAlive);
+      const abstainCount = [...game.votes.values()].filter((v) => v === null).length;
+      if (abstainCount > alivePlayers.length / 2) {
+        await gameChannel.send(`決選投票で過半数（${abstainCount}人）が棄権したため、投票は無効となりました。明日へ続きます。`);
+        await this.startNight(guild, game);
+        return;
+      }
+
       const voteCount = new Map<string, number>();
-      for (const [, target] of game.votes) voteCount.set(target, (voteCount.get(target) || 0) + 1);
+      for (const [, target] of game.votes) {
+        if (target !== null) voteCount.set(target, (voteCount.get(target) || 0) + 1);
+      }
 
       if (voteCount.size === 0) {
         await gameChannel.send("決選投票でも決着がつきませんでした。明日へ続きます。");
@@ -519,7 +627,7 @@ export class GameManager {
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     const gameVoice = guild.channels.cache.get(game.gameVoiceChannelId!) as VoiceChannel;
 
-    await gameChannel.send(`**${game.dayCount}日目の夜です。**\n全員ミュートになりました。下のボタンをクリックしてアクションを行ってください。`);
+    await gameChannel.send(`**${game.dayCount}日目の夜です。**\n全員ミュートになりました。能力を持つプレイヤーは下のボタンをクリックしてアクションを行ってください。`);
 
     if (gameVoice) {
       for (const pid of game.participants) {
@@ -540,61 +648,54 @@ export class GameManager {
       await wwChannel.send(`**夜になりました。** 襲撃する相手を相談してください。`);
     }
 
+    log(guild.id, `Night ${game.dayCount} started`);
+
     game.nightActionResult = [];
     await this.runNightActions(guild, game);
   }
 
   private async runNightActions(guild: Guild, game: GameState): Promise<void> {
+    const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     const alivePlayers = game.participants.filter((p) => game.players.get(p)?.isAlive);
-    const actionQueue: RoleType[] = [];
 
-    if (alivePlayers.some((p) => game.players.get(p)?.role === RoleType.KNIGHT)) actionQueue.push(RoleType.KNIGHT);
-    if (alivePlayers.some((p) => game.players.get(p)?.role === RoleType.FORTUNE_TELLER)) actionQueue.push(RoleType.FORTUNE_TELLER);
-    if (alivePlayers.some((p) => game.players.get(p)?.role === RoleType.MEDIUM)) actionQueue.push(RoleType.MEDIUM);
-    actionQueue.push(RoleType.WEREWOLF);
+    const hasNightRole = alivePlayers.some((p) => {
+      const r = game.players.get(p)?.role;
+      return r === RoleType.KNIGHT || r === RoleType.FORTUNE_TELLER || r === RoleType.MEDIUM || r === RoleType.WEREWOLF;
+    });
 
-    await this.processNightActionQueue(guild, game, actionQueue, 0);
-  }
-
-  private async processNightActionQueue(guild: Guild, game: GameState, queue: RoleType[], index: number): Promise<void> {
-    if (index >= queue.length) { await this.finalizeNight(guild, game); return; }
-
-    const role = queue[index];
-    const alivePlayers = game.participants.filter((p) => game.players.get(p)?.isAlive);
-    const actors = alivePlayers.filter((p) => game.players.get(p)?.role === role);
-
-    if (actors.length === 0) {
-      await this.processNightActionQueue(guild, game, queue, index + 1);
+    if (!hasNightRole) {
+      await this.finalizeNight(guild, game);
       return;
     }
 
-    const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
-    const label = role === RoleType.WEREWOLF ? `襲撃する` : `能力を使う`;
-
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId(`night_${role}`).setLabel(`${getRoleName(role)}: ${label}`).setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId("night_action_btn")
+        .setLabel("夜のアクションを行う")
+        .setStyle(ButtonStyle.Primary),
     );
 
-    const msg = await gameChannel.send({
-      content: `**${getRoleName(role)}のアクション**: ${actors.map((a) => `<@${a}>`).join(", ")} さん、下のボタンをクリックしてください。`,
+    await gameChannel.send({
+      content: "**夜のアクション:** 下のボタンをクリックしてアクションを行ってください。\n（クリックするとあなただけに見える形で操作できます）",
       components: [row],
     });
 
-    let actionResolve: () => void;
-    const actionPromise = new Promise<void>((resolve) => { actionResolve = resolve; });
-
-    const completed = new Set<string>();
-    const totalActors = actors.length;
-    const targets = alivePlayers;
-
-    const collector = gameChannel.createMessageComponentCollector({
-      filter: (i) => i.customId === `night_${role}` && actors.includes(i.user.id),
-      time: 35000,
+    const btnCollector = gameChannel.createMessageComponentCollector({
+      filter: (i) => i.customId === "night_action_btn" && alivePlayers.includes(i.user.id),
+      time: 85000,
     });
 
-    collector.on("collect", async (i) => {
+    btnCollector.on("collect", async (i) => {
+      const info = this.getNightActionInfo(game.guildId, i.user.id);
+      if (typeof info === "string") {
+        await i.reply({ content: info, flags: EPHEMERAL });
+        return;
+      }
+
+      const { role, targets } = info;
+
       const select = new StringSelectMenuBuilder()
-        .setCustomId(`night_select_${role}`)
+        .setCustomId("night_action_select")
         .setPlaceholder("対象を選んでください")
         .addOptions(targets.map((t) =>
           new StringSelectMenuOptionBuilder()
@@ -610,57 +711,119 @@ export class GameManager {
     });
 
     const selectCollector = gameChannel.createMessageComponentCollector({
-      filter: (i) => i.customId === `night_select_${role}` && actors.includes(i.user.id),
-      time: 35000,
+      filter: (i) => i.customId === "night_action_select" && alivePlayers.includes(i.user.id),
+      time: 85000,
     });
 
     selectCollector.on("collect", async (i) => {
       if (!i.isStringSelectMenu()) return;
-      const targetId = i.values[0];
-      if (completed.has(i.user.id)) {
+      const role = game.players.get(i.user.id)?.role;
+      if (!role) return;
+
+      const alreadyActed = game.nightActionResult.some((a) => a.startsWith(`${role}:${i.user.id}:`));
+      if (alreadyActed) {
         await i.update({ content: "すでにアクションは完了しています。", components: [] });
         return;
       }
-      completed.add(i.user.id);
 
-      game.nightActionResult.push(`${role}:${i.user.id}:${targetId}`);
-
-      let actionMsg = "";
-      switch (role) {
-        case RoleType.KNIGHT:
-          game.players.get(targetId)!.isProtected = true;
-          actionMsg = `**<@${targetId}>** を守護しました。`;
-          break;
-        case RoleType.FORTUNE_TELLER:
-          actionMsg = `**<@${targetId}>** の陣営: **${getFortuneResult(game.players.get(targetId)!.role)}**`;
-          break;
-        case RoleType.MEDIUM:
-          actionMsg = !game.players.get(targetId)?.isAlive
-            ? `**<@${targetId}>** は死亡しています。陣営: **${getFortuneResult(game.players.get(targetId)!.role)}**`
-            : `**<@${targetId}>** は生存しています。`;
-          break;
-        case RoleType.WEREWOLF:
-          actionMsg = `**<@${targetId}>** を襲撃対象に選びました。`;
-          break;
-      }
-
-      await i.update({ content: actionMsg, components: [] });
-
-      if (completed.size >= totalActors) {
-        collector.stop();
-        selectCollector.stop();
-        actionResolve!();
-      }
+      const targetId = i.values[0];
+      const resultMsg = this.recordNightAction(game.guildId, i.user.id, targetId, role);
+      await i.update({ content: resultMsg, components: [] });
     });
 
-    setTimeout(() => {
-      collector.stop();
-      selectCollector.stop();
-      actionResolve!();
-    }, 40000);
+    await new Promise<void>((resolve) => {
+      if (game.nightActionTimeout) clearTimeout(game.nightActionTimeout);
+      game.nightActionTimeout = setTimeout(resolve, 90000);
+    });
 
-    await actionPromise;
-    await this.processNightActionQueue(guild, game, queue, index + 1);
+    btnCollector.stop();
+    selectCollector.stop();
+    log(guild.id, `Night actions timeout, finalizing night ${game.dayCount}`);
+    await this.finalizeNight(guild, game);
+  }
+
+  getMyRole(guildId: string, userId: string): string | null {
+    const game = this.games.get(guildId);
+    if (!game) return null;
+    const player = game.players.get(userId);
+    if (!player) return null;
+
+    const def = ROLE_DEFINITIONS[player.role];
+    const werewolfIds = game.participants.filter((p) => game.players.get(p)?.role === RoleType.WEREWOLF);
+    const fanaticIds = game.participants.filter((p) => game.players.get(p)?.role === RoleType.FANATIC);
+
+    let msg = `あなたの役職は **${def.name}** です！\n${def.description}\n勝利条件: ${def.winCondition}`;
+
+    if (player.role === RoleType.WEREWOLF && werewolfIds.length > 0) {
+      msg += `\n\n**他の人狼**: ${werewolfIds.filter((id) => id !== userId).map((id) => `<@${id}>`).join(", ")}`;
+    }
+    if (player.role === RoleType.WEREWOLF && fanaticIds.length > 0) {
+      msg += `\n\n**狂信者**: ${fanaticIds.map((id) => `<@${id}>`).join(", ")}`;
+    }
+    if (player.role === RoleType.FANATIC && werewolfIds.length > 0) {
+      msg += `\n\n**人狼メンバー**: ${werewolfIds.map((id) => `<@${id}>`).join(", ")}`;
+    }
+    if (player.role === RoleType.ACCOMPLICE && werewolfIds.length > 0) {
+      msg += `\n\n**人狼メンバー**: ${werewolfIds.map((id) => `<@${id}>`).join(", ")}`;
+    }
+
+    return msg;
+  }
+
+  getNightActionInfo(guildId: string, userId: string): { role: RoleType; targets: string[] } | string {
+    const game = this.games.get(guildId);
+    if (!game || game.phase !== GamePhase.NIGHT) return "現在夜ではありません。";
+    const player = game.players.get(userId);
+    if (!player || !player.isAlive) return "あなたには夜の能力がありません。";
+
+    const role = player.role;
+    const alivePlayers = game.participants.filter((p) => game.players.get(p)?.isAlive);
+
+    let targets: string[];
+    switch (role) {
+      case RoleType.KNIGHT:
+        targets = alivePlayers;
+        break;
+      case RoleType.FORTUNE_TELLER:
+        targets = alivePlayers;
+        break;
+      case RoleType.MEDIUM:
+        targets = game.participants;
+        break;
+      case RoleType.WEREWOLF:
+        targets = alivePlayers.filter((p) => p !== userId);
+        break;
+      default:
+        return "あなたには夜の能力がありません。";
+    }
+
+    const alreadyActed = game.nightActionResult.some((a) => a.startsWith(`${role}:${userId}:`));
+    if (alreadyActed) return "すでにアクションは完了しています。";
+
+    return { role, targets };
+  }
+
+  recordNightAction(guildId: string, userId: string, targetId: string, role: RoleType): string {
+    const game = this.games.get(guildId);
+    if (!game) return "エラー: ゲームが見つかりません。";
+
+    game.nightActionResult.push(`${role}:${userId}:${targetId}`);
+
+    switch (role) {
+      case RoleType.KNIGHT:
+        game.players.get(targetId)!.isProtected = true;
+        return `**<@${targetId}>** を守護しました。`;
+      case RoleType.FORTUNE_TELLER:
+        return `**<@${targetId}>** の陣営: **${getFortuneResult(game.players.get(targetId)!.role)}**`;
+      case RoleType.MEDIUM:
+        return !game.players.get(targetId)?.isAlive
+          ? `**<@${targetId}>** は死亡しています。陣営: **${getFortuneResult(game.players.get(targetId)!.role)}**`
+          : `**<@${targetId}>** は生存しています。`;
+      case RoleType.WEREWOLF:
+        return `**<@${targetId}>** を襲撃対象に選びました。`;
+      default:
+        return "アクションを記録しました。";
+    }
   }
 
   private async finalizeNight(guild: Guild, game: GameState): Promise<void> {
@@ -683,6 +846,7 @@ export class GameManager {
             await gameChannel.send("妖狐は人狼の襲撃を回避しました。");
           } else if (tp.role === RoleType.NEKOMATA) {
             tp.isAlive = false;
+            await this.handlePlayerDeath(guild, game, targetId);
             await gameChannel.send(`**<@${targetId}>** が昨夜、殺害されました。（猫又）`);
             const specChannel = guild.channels.cache.get(game.spectatorTextChannelId!) as TextChannel;
             if (specChannel) await specChannel.send(`**${game.dayCount}日目の夜:** <@${targetId}> (猫又) が人狼に殺害されました。`);
@@ -692,6 +856,7 @@ export class GameManager {
             tp.isProtected = false;
           } else {
             tp.isAlive = false;
+            await this.handlePlayerDeath(guild, game, targetId);
             await gameChannel.send(`**<@${targetId}>** が昨夜、殺害されました。`);
           }
         }
@@ -715,10 +880,13 @@ export class GameManager {
       await specChannel.send(info);
     }
 
+    log(guild.id, `Night ${game.dayCount} finalized, survivors: ${game.participants.filter((p) => game.players.get(p)?.isAlive).length}/${game.participants.length}`);
+
     if (this.checkWinCondition(game)) return;
 
     await gameChannel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: null });
     game.dayCount++;
+    log(guild.id, `Day ${game.dayCount} starting`);
     await this.startDayDiscussion(guild, game);
   }
 
@@ -728,15 +896,65 @@ export class GameManager {
     const aliveVillagerSide = alive.filter((p) => game.players.get(p)!.team === Team.VILLAGER || isCountedAsVillager(game.players.get(p)!.role));
     const aliveFox = alive.filter((p) => game.players.get(p)!.role === RoleType.FOX);
 
+    log(game.guildId, `Win check: ${alive.length} alive, werewolves=${aliveTrueWW.length}, villageSide=${aliveVillagerSide.length}, fox=${aliveFox.length}`);
+
     if (aliveTrueWW.length === 0) {
+      log(game.guildId, "Win condition: all werewolves eliminated");
       this.handleWin(game, aliveFox.length > 0 ? null : Team.VILLAGER, false, aliveFox.length > 0);
       return true;
     }
     if (aliveTrueWW.length >= aliveVillagerSide.length) {
+      log(game.guildId, `Win condition: werewolves (${aliveTrueWW.length}) >= villageSide (${aliveVillagerSide.length})`);
       this.handleWin(game, aliveFox.length > 0 ? null : Team.WEREWOLF, false, aliveFox.length > 0);
       return true;
     }
     return false;
+  }
+
+  private async unlockAllChannels(guild: Guild, game: GameState): Promise<void> {
+    const e = guild.roles.everyone;
+    const ids: (string | null)[] = [
+      game.gameTextChannelId, game.werewolfTextChannelId,
+      game.spectatorTextChannelId, game.gameVoiceChannelId,
+    ];
+    for (const id of ids) {
+      if (!id) continue;
+      const ch = guild.channels.cache.get(id);
+      if (!ch) continue;
+      if (!("permissionOverwrites" in ch)) continue;
+      try {
+        await (ch as TextChannel | VoiceChannel).permissionOverwrites.edit(e, { ViewChannel: true, SendMessages: true, Connect: true, Speak: true });
+      } catch {}
+    }
+
+    if (game.gameTextChannelId) {
+      const gtch = guild.channels.cache.get(game.gameTextChannelId) as TextChannel | undefined;
+      if (gtch) {
+        for (const [, ow] of gtch.permissionOverwrites.cache) {
+          if (ow.type === OverwriteType.Member) {
+            try { await ow.delete(); } catch {}
+          }
+        }
+      }
+    }
+
+    if (game.gameVoiceChannelId) {
+      const vc = guild.channels.cache.get(game.gameVoiceChannelId) as VoiceChannel | undefined;
+      if (vc) {
+        for (const member of [...vc.members.values()]) {
+          try { await member.voice.setMute(false); } catch {}
+        }
+      }
+    }
+
+    if (game.waitingVoiceChannelId) {
+      const wvc = guild.channels.cache.get(game.waitingVoiceChannelId) as VoiceChannel | undefined;
+      if (wvc) {
+        for (const member of [...wvc.members.values()]) {
+          try { await member.voice.setMute(false); } catch {}
+        }
+      }
+    }
   }
 
   private async handleWin(game: GameState, winningTeam: Team | null, _teruTeru = false, foxWin = false): Promise<void> {
@@ -744,6 +962,11 @@ export class GameManager {
     if (!guild) return;
     game.phase = GamePhase.FINISHED;
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
+
+    await this.unlockAllChannels(guild, game);
+
+    let winMsg = foxWin ? "妖狐" : winningTeam === Team.VILLAGER ? "市民陣営" : winningTeam === Team.WEREWOLF ? "人狼陣営" : "不明";
+    log(game.guildId, `Game over — winner: ${winMsg}`);
 
     let r = "**=== ゲーム終了 ===**\n\n";
     if (foxWin) r += "**妖狐の勝利！**\n妖狐が生き残り、他の陣営の勝利を打ち消しました。\n\n";
@@ -789,6 +1012,7 @@ export class GameManager {
     if (!game) return "ゲームが進行中ではありません。";
     if (game.hostUserId !== userId) return "ホストのみがスキップできます。";
     if (game.phase !== GamePhase.DAY_DISCUSSION) return "会議時間中のみスキップできます。";
+    log(guildId, `Host <${userId}> skipped to voting`);
     if (game.meetingTimer) clearTimeout(game.meetingTimer);
     const guild = this.client.guilds.cache.get(guildId);
     if (guild) await this.startVoting(guild, game);
@@ -800,6 +1024,7 @@ export class GameManager {
     if (!game) return "ゲームが進行中ではありません。";
     if (game.hostUserId !== userId) return "ホストのみがゲームを停止できます。";
     if (game.phase === GamePhase.WAITING || game.phase === GamePhase.FINISHED) return "試合中のみ使用できます。";
+    log(guildId, `Host <${userId}> stopped the game (phase: ${game.phase})`);
     await this.cleanupGame(guildId);
     return "ゲームを強制終了し、初期化しました。";
   }
@@ -809,6 +1034,7 @@ export class GameManager {
     if (!game) return "ゲームが進行中ではありません。";
     if (game.phase !== GamePhase.FINISHED) return "試合終了後のみ使用できます。";
     if (game.hostUserId !== userId) return "ホストのみがゲームを終了できます。";
+    log(guildId, `Host <${userId}> ended the game`);
     await this.cleanupGame(guildId);
     return "ゲームを初期化しました。";
   }
@@ -816,20 +1042,46 @@ export class GameManager {
   private async cleanupGame(guildId: string): Promise<void> {
     const game = this.games.get(guildId);
     if (!game) return;
+    log(guildId, "Cleaning up game channels and state");
     const guild = this.client.guilds.cache.get(guildId);
     if (guild) {
+      if (game.waitingVoiceChannelId) {
+        const wvc = guild.channels.cache.get(game.waitingVoiceChannelId) as VoiceChannel | undefined;
+        if (wvc) {
+          for (const member of [...wvc.members.values()]) {
+            try { await member.voice.setMute(false); } catch {}
+          }
+        }
+      }
+
       if (game.gameVoiceChannelId) {
         const gameVC = guild.channels.cache.get(game.gameVoiceChannelId) as VoiceChannel | undefined;
         if (gameVC) {
+          for (const member of [...gameVC.members.values()]) {
+            try { await member.voice.setMute(false); } catch {}
+          }
           const waitingVC = game.waitingVoiceChannelId ? (guild.channels.cache.get(game.waitingVoiceChannelId) as VoiceChannel | undefined) : undefined;
           for (const member of [...gameVC.members.values()]) {
             try { if (waitingVC) await member.voice.setChannel(waitingVC); else await member.voice.disconnect(); } catch {}
           }
         }
       }
+
+      let categoryId: string | null = null;
       const ids = [game.gameTextChannelId, game.gameVoiceChannelId, game.werewolfTextChannelId, game.spectatorTextChannelId];
       for (const id of ids) {
-        if (id) { const ch = guild.channels.cache.get(id); if (ch) { try { await ch.delete(); } catch {} } }
+        if (id) {
+          const ch = guild.channels.cache.get(id);
+          if (ch) {
+            if (!categoryId && ch.parentId) categoryId = ch.parentId;
+            try { await ch.delete(); } catch {}
+          }
+        }
+      }
+
+      if (categoryId) {
+        const cat = guild.channels.cache.get(categoryId);
+        if (cat) { try { await cat.delete(); } catch {} }
       }
     }
     if (game.meetingTimer) clearTimeout(game.meetingTimer);

@@ -1,0 +1,17 @@
+{
+  "1518594559104385236": {
+    "hostUserId": "1300444920242376704",
+    "participants": [
+      "1484198652795814033",
+      "1357425072008073216",
+      "1300444920242376704",
+      "1247131385865572424"
+    ],
+    "roleDistribution": {
+      "werewolf": 1,
+      "accomplice": 1,
+      "fortune_teller": 1
+    },
+    "meetingTimeMinutes": 3
+  }
+}

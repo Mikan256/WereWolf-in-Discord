@@ -61,7 +61,7 @@ export interface GameState {
   werewolfTextChannelId: string | null;
   spectatorTextChannelId: string | null;
   waitingVoiceChannelId: string | null;
-  votes: Map<string, string>;
+  votes: Map<string, string | null>;
   nightActionResult: string[];
   meetingTimer: NodeJS.Timeout | null;
   nightActionTimeout: NodeJS.Timeout | null;
