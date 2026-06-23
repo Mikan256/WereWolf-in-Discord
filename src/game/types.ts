@@ -38,6 +38,7 @@ export interface RoleInfo {
 export interface GameSettings {
   meetingTimeMinutes: number;
   roleDistribution: Partial<Record<RoleType, number>>;
+  anonymousVoting: boolean;
 }
 
 export interface PlayerState {

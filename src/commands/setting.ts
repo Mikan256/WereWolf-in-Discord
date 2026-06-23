@@ -38,6 +38,7 @@ interface InteractiveState {
   meetingMinutes: number;
   page: Page;
   selectedRoleKey: string | null;
+  anonymousVoting: boolean;
 }
 
 export const data = new SlashCommandBuilder()
@@ -57,7 +58,8 @@ export const data = new SlashCommandBuilder()
   .addIntegerOption((o) => o.setName("てるてる坊主").setDescription("てるてる坊主の数").setRequired(false).setMinValue(0).setMaxValue(1))
   .addIntegerOption((o) => o.setName("猫又").setDescription("猫又の数").setRequired(false).setMinValue(0).setMaxValue(2))
   .addIntegerOption((o) => o.setName("黒猫").setDescription("黒猫の数").setRequired(false).setMinValue(0).setMaxValue(2))
-  .addIntegerOption((o) => o.setName("会議時間").setDescription("会議時間(分)").setRequired(false).setMinValue(1).setMaxValue(30));
+  .addIntegerOption((o) => o.setName("会議時間").setDescription("会議時間(分)").setRequired(false).setMinValue(1).setMaxValue(30))
+  .addBooleanOption((o) => o.setName("匿名投票").setDescription("投票結果を匿名にする（デフォルト: true）").setRequired(false));
 
 function parseMentions(raw: string): string[] {
   const ids: string[] = [];
@@ -96,6 +98,8 @@ async function executeWithArgs(
     return v !== null ? v : def;
   };
 
+  const anonymousVoting = interaction.options.getBoolean("匿名投票") ?? true;
+
   await gameManager.setSetting(
     interaction.guildId!,
     interaction.user.id,
@@ -105,6 +109,7 @@ async function executeWithArgs(
     opt("妖狐"), optOrDefault("占い師", 1), opt("霊媒師"), opt("騎士"),
     opt("てるてる坊主"), opt("猫又"), opt("黒猫"),
     optOrDefault("会議時間", 3),
+    anonymousVoting,
   );
 
   const s =
@@ -112,7 +117,8 @@ async function executeWithArgs(
     `人狼: ${optOrDefault("人狼", 1)} / 共犯者: ${opt("共犯者")} / 狂人: ${opt("狂人")} / 狂信者: ${opt("狂信者")}\n` +
     `妖狐: ${opt("妖狐")} / 占い師: ${optOrDefault("占い師", 1)} / 霊媒師: ${opt("霊媒師")} / 騎士: ${opt("騎士")}\n` +
     `てるてる坊主: ${opt("てるてる坊主")} / 猫又: ${opt("猫又")} / 黒猫: ${opt("黒猫")}\n` +
-    `会議時間: ${optOrDefault("会議時間", 3)}分`;
+    `会議時間: ${optOrDefault("会議時間", 3)}分\n` +
+    `投票公開: ${anonymousVoting ? "匿名" : "公開"}`;
 
   await interaction.editReply(s);
 }
@@ -124,6 +130,7 @@ async function executeInteractive(interaction: ChatInputCommandInteraction, game
     meetingMinutes: 3,
     page: "main",
     selectedRoleKey: null,
+    anonymousVoting: true,
   };
 
   const userId = interaction.user.id;
@@ -162,6 +169,7 @@ function buildEmbed(state: InteractiveState): EmbedBuilder {
     .addFields(
       { name: "参加者", value: state.participants.length > 0 ? `${state.participants.length}人` : "未設定", inline: true },
       { name: "会議時間", value: `${state.meetingMinutes}分`, inline: true },
+      { name: "投票表示", value: state.anonymousVoting ? "匿名" : "公開", inline: true },
       { name: "役職内訳", value: ROLE_OPTIONS.map((r) => `${r.key}: ${state.roleCounts[r.key]}人`).join("\n"), inline: false },
     );
 }
@@ -173,7 +181,9 @@ async function render(interaction: ChatInputCommandInteraction, state: Interacti
       new ButtonBuilder().setCustomId("set_roles").setLabel("役職を設定").setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId("set_time").setLabel("会議時間").setStyle(ButtonStyle.Primary),
     );
+    const toggleLabel = state.anonymousVoting ? "投票公開: 匿名" : "投票公開: 公開";
     const row2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId("toggle_anonymous").setLabel(toggleLabel).setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId("save").setLabel("保存").setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId("cancel").setLabel("キャンセル").setStyle(ButtonStyle.Danger),
     );
@@ -272,10 +282,16 @@ async function handleMainAction(
       get("人狼"), get("共犯者"), get("狂人"), get("狂信者"),
       get("妖狐"), get("占い師"), get("霊媒師"), get("騎士"),
       get("てるてる坊主"), get("猫又"), get("黒猫"),
-      state.meetingMinutes,
+      state.meetingMinutes, state.anonymousVoting,
     );
     await interaction.editReply({ content: result, embeds: [], components: [] });
     return false;
+  }
+
+  if (ci.customId === "toggle_anonymous") {
+    state.anonymousVoting = !state.anonymousVoting;
+    await ci.deferUpdate();
+    return true;
   }
 
   await ci.deferUpdate();

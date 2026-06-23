@@ -54,8 +54,8 @@ export class GameManager {
   createGame(guildId: string, hostUserId: string): GameState {
     const persisted = this.persistence.getSettings(guildId);
     const settings = persisted
-      ? { meetingTimeMinutes: persisted.meetingTimeMinutes, roleDistribution: { ...persisted.roleDistribution } }
-      : { meetingTimeMinutes: 3, roleDistribution: {} };
+      ? { meetingTimeMinutes: persisted.meetingTimeMinutes, roleDistribution: { ...persisted.roleDistribution }, anonymousVoting: persisted.anonymousVoting ?? true }
+      : { meetingTimeMinutes: 3, roleDistribution: {}, anonymousVoting: true };
 
     const game: GameState = {
       guildId, hostUserId,
@@ -84,6 +84,7 @@ export class GameManager {
     fanaticCount: number, foxCount: number, fortuneTellerCount: number,
     mediumCount: number, knightCount: number, teruTeruCount: number,
     nekomataCount: number, blackCatCount: number, meetingTimeMinutes: number,
+    anonymousVoting?: boolean,
   ): Promise<string> {
     let game = this.games.get(guildId);
     if (!game) game = this.createGame(guildId, hostUserId);
@@ -107,14 +108,16 @@ export class GameManager {
     ];
     for (const [c, r] of entries) { if (c > 0) game.settings.roleDistribution[r] = c; }
     game.settings.meetingTimeMinutes = meetingTimeMinutes;
+    if (anonymousVoting !== undefined) game.settings.anonymousVoting = anonymousVoting;
 
-    log(guildId, `Settings updated: participants=${participants.length}, roles=${JSON.stringify(game.settings.roleDistribution)}, meetingTime=${meetingTimeMinutes}min`);
+    log(guildId, `Settings updated: participants=${participants.length}, roles=${JSON.stringify(game.settings.roleDistribution)}, meetingTime=${meetingTimeMinutes}min, anonymousVoting=${game.settings.anonymousVoting}`);
 
     this.persistence.setSettings(guildId, {
       hostUserId,
       participants,
       roleDistribution: { ...game.settings.roleDistribution },
       meetingTimeMinutes,
+      anonymousVoting: game.settings.anonymousVoting,
     });
 
     return "設定が完了しました。`/start` でゲームを開始できます。";
@@ -392,12 +395,29 @@ export class GameManager {
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     const alivePlayers = game.participants.filter((p) => game.players.get(p)?.isAlive);
 
-    let resultMsg = "**投票結果:**\n";
-    for (const pid of alivePlayers) {
-      const vote = game.votes.get(pid);
-      resultMsg += `<@${pid}> → ${vote ? `<@${vote}>` : "棄権"}\n`;
-    }
+    const buildResultMsg = (title: string): string => {
+      if (game.settings.anonymousVoting) {
+        const counts = new Map<string, number>();
+        let abstain = 0;
+        for (const [, target] of game.votes) {
+          if (target === null) abstain++;
+          else counts.set(target, (counts.get(target) || 0) + 1);
+        }
+        let msg = `${title}\n`;
+        for (const [pid, c] of counts) msg += `<@${pid}>: ${c}票\n`;
+        if (abstain > 0) msg += `棄権: ${abstain}人\n`;
+        return msg;
+      } else {
+        let msg = `${title}\n`;
+        for (const pid of alivePlayers) {
+          const vote = game.votes.get(pid);
+          msg += `<@${pid}> → ${vote !== null ? `<@${vote}>` : "棄権"}\n`;
+        }
+        return msg;
+      }
+    };
 
+    const resultMsg = buildResultMsg("**投票結果:**");
     const abstainCount = [...game.votes.values()].filter((v) => v === null).length;
     if (abstainCount > alivePlayers.length / 2) {
       await gameChannel.send(resultMsg + `\n過半数（${abstainCount}人）が棄権したため、投票は無効となりました。明日へ続きます。`);
@@ -454,15 +474,10 @@ export class GameManager {
 
     try { await gameTextChannel.permissionOverwrites.edit(playerId, { SendMessages: false }); } catch {}
 
-    if (game.gameVoiceChannelId) {
-      const vc = guild.channels.cache.get(game.gameVoiceChannelId) as VoiceChannel | undefined;
-      if (vc) {
-        try {
-          const member = await guild.members.fetch(playerId);
-          if (member.voice.channelId === vc.id) await member.voice.setMute(true);
-        } catch {}
-      }
-    }
+    try {
+      const member = await guild.members.fetch(playerId);
+      await member.voice.setMute(true);
+    } catch {}
   }
 
   private async handleElimination(guild: Guild, game: GameState, playerId: string, cause: "vote" | "werewolf"): Promise<void> {
@@ -602,6 +617,18 @@ export class GameManager {
         await this.startNight(guild, game);
         return;
       }
+
+      let runoffResult = "**決選投票結果:**\n";
+      if (game.settings.anonymousVoting) {
+        for (const [pid, c] of voteCount) runoffResult += `<@${pid}>: ${c}票\n`;
+        if (abstainCount > 0) runoffResult += `棄権: ${abstainCount}人\n`;
+      } else {
+        for (const pid of alivePlayers) {
+          const vote = game.votes.get(pid);
+          runoffResult += `<@${pid}> → ${vote !== null ? `<@${vote}>` : "棄権"}\n`;
+        }
+      }
+      await gameChannel.send(runoffResult);
 
       const maxVotes = Math.max(...voteCount.values());
       const mostVoted: string[] = [];
@@ -1012,10 +1039,15 @@ export class GameManager {
     if (!game) return "ゲームが進行中ではありません。";
     if (game.hostUserId !== userId) return "ホストのみがスキップできます。";
     if (game.phase !== GamePhase.DAY_DISCUSSION) return "会議時間中のみスキップできます。";
-    log(guildId, `Host <${userId}> skipped to voting`);
+    log(guildId, `Host <${userId}> skipped meeting`);
     if (game.meetingTimer) clearTimeout(game.meetingTimer);
     const guild = this.client.guilds.cache.get(guildId);
-    if (guild) await this.startVoting(guild, game);
+    if (!guild) return "ギルドが見つかりません。";
+    if (game.dayCount === 1) {
+      await this.startNight(guild, game);
+      return "会議をスキップし、夜に移ります。（1日目は投票を行いません）";
+    }
+    await this.startVoting(guild, game);
     return "会議をスキップし、投票に移ります。";
   }
 

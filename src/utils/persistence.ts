@@ -7,6 +7,7 @@ export interface PersistedSettings {
   participants: string[];
   roleDistribution: Partial<Record<RoleType, number>>;
   meetingTimeMinutes: number;
+  anonymousVoting: boolean;
 }
 
 export class PersistenceManager {
