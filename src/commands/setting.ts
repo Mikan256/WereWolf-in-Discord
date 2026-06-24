@@ -276,15 +276,20 @@ async function handleMainAction(
       return true;
     }
     await ci.deferUpdate();
-    const get = (k: string) => state.roleCounts[k] ?? 0;
-    const result = await gameManager.setSetting(
-      interaction.guildId!, userId, state.participants,
-      get("人狼"), get("共犯者"), get("狂人"), get("狂信者"),
-      get("妖狐"), get("占い師"), get("霊媒師"), get("騎士"),
-      get("てるてる坊主"), get("猫又"), get("黒猫"),
-      state.meetingMinutes, state.anonymousVoting,
-    );
-    await interaction.editReply({ content: result, embeds: [], components: [] });
+    try {
+      const get = (k: string) => state.roleCounts[k] ?? 0;
+      const result = await gameManager.setSetting(
+        interaction.guildId!, userId, state.participants,
+        get("人狼"), get("共犯者"), get("狂人"), get("狂信者"),
+        get("妖狐"), get("占い師"), get("霊媒師"), get("騎士"),
+        get("てるてる坊主"), get("猫又"), get("黒猫"),
+        state.meetingMinutes, state.anonymousVoting,
+      );
+      await ci.editReply({ content: result, embeds: [], components: [] });
+    } catch (e) {
+      console.error("Save error:", e);
+      await ci.editReply({ content: "設定の保存中にエラーが発生しました。", embeds: [], components: [] }).catch(() => {});
+    }
     return false;
   }
 

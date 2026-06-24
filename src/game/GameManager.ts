@@ -112,13 +112,18 @@ export class GameManager {
 
     log(guildId, `Settings updated: participants=${participants.length}, roles=${JSON.stringify(game.settings.roleDistribution)}, meetingTime=${meetingTimeMinutes}min, anonymousVoting=${game.settings.anonymousVoting}`);
 
-    this.persistence.setSettings(guildId, {
-      hostUserId,
-      participants,
-      roleDistribution: { ...game.settings.roleDistribution },
-      meetingTimeMinutes,
-      anonymousVoting: game.settings.anonymousVoting,
-    });
+    try {
+      await this.persistence.setSettings(guildId, {
+        hostUserId,
+        participants,
+        roleDistribution: { ...game.settings.roleDistribution },
+        meetingTimeMinutes,
+        anonymousVoting: game.settings.anonymousVoting,
+      });
+    } catch (e) {
+      log(guildId, `Persistence save failed: ${e}`);
+      return "設定の保存に失敗しました。ファイルの権限を確認してください。";
+    }
 
     return "設定が完了しました。`/start` でゲームを開始できます。";
   }
@@ -717,6 +722,8 @@ export class GameManager {
   private async runNightActions(guild: Guild, game: GameState): Promise<void> {
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     const alivePlayers = game.participants.filter((p) => game.players.get(p)?.isAlive);
+    const wwChannel = game.werewolfTextChannelId
+      ? (guild.channels.cache.get(game.werewolfTextChannelId) as TextChannel | undefined) : undefined;
 
     const hasNightRole = alivePlayers.some((p) => {
       const r = game.players.get(p)?.role;
@@ -784,10 +791,9 @@ export class GameManager {
     const tryResolveNight = () => {
       if (!nightResolve) return;
       const actedUsers = new Set(game.nightActionResult.map((a) => a.split(":")[1]));
-      const werewolfActed = game.nightActionResult.some((a) => a.startsWith("werewolf:"));
       const allDone = nightRolePlayers.every((pid) => {
         const r = game.players.get(pid)?.role;
-        if (r === RoleType.WEREWOLF) return werewolfActed;
+        if (r === RoleType.WEREWOLF) return actedUsers.has(pid);
         return actedUsers.has(pid);
       });
       if (allDone) { nightResolve(); nightResolve = null; }
@@ -798,15 +804,26 @@ export class GameManager {
       const role = game.players.get(i.user.id)?.role;
       if (!role) return;
 
-      const alreadyActed = game.nightActionResult.some((a) => a.startsWith(`${role}:${i.user.id}:`));
-      if (alreadyActed) {
-        await i.update({ content: "すでにアクションは完了しています。", components: [] });
-        return;
-      }
-
       const targetId = i.values[0];
       const resultMsg = this.recordNightAction(game.guildId, i.user.id, targetId, role);
       await i.update({ content: resultMsg, components: [] });
+
+      if (role === RoleType.WEREWOLF && wwChannel) {
+        const aliveWolfIds = game.participants.filter((p) => game.players.get(p)?.role === RoleType.WEREWOLF && game.players.get(p)?.isAlive);
+        const wolfVotes = game.nightActionResult.filter((a) => a.startsWith("werewolf:"));
+        const votedCount = new Set(wolfVotes.map((a) => a.split(":")[1])).size;
+        await wwChannel.send(`<@${i.user.id}> が <@${targetId}> に投票しました。（${votedCount}/${aliveWolfIds.length} 投票済み）`);
+        if (votedCount >= aliveWolfIds.length) {
+          const voteCounts: Record<string, number> = {};
+          for (const a of wolfVotes) {
+            const tid = a.split(":")[2];
+            voteCounts[tid] = (voteCounts[tid] || 0) + 1;
+          }
+          const sorted = Object.entries(voteCounts).sort(([, a], [, b]) => b - a);
+          await wwChannel.send(`**全人狼の投票が揃いました。** 襲撃対象: <@${sorted[0][0]}>（${sorted[0][1]}票）に決定しました。`);
+        }
+      }
+
       tryResolveNight();
     });
 
@@ -880,8 +897,10 @@ export class GameManager {
         return "あなたには夜の能力がありません。";
     }
 
-    const alreadyActed = game.nightActionResult.some((a) => a.startsWith(`${role}:${userId}:`));
-    if (alreadyActed) return "すでにアクションは完了しています。";
+    if (role !== RoleType.WEREWOLF) {
+      const alreadyActed = game.nightActionResult.some((a) => a.startsWith(`${role}:${userId}:`));
+      if (alreadyActed) return "すでにアクションは完了しています。";
+    }
 
     return { role, targets };
   }
@@ -890,7 +909,16 @@ export class GameManager {
     const game = this.games.get(guildId);
     if (!game) return "エラー: ゲームが見つかりません。";
 
-    game.nightActionResult.push(`${role}:${userId}:${targetId}`);
+    if (role === RoleType.WEREWOLF) {
+      const oldIdx = game.nightActionResult.findIndex((a) => a.startsWith(`werewolf:${userId}:`));
+      if (oldIdx >= 0) {
+        game.nightActionResult[oldIdx] = `${role}:${userId}:${targetId}`;
+      } else {
+        game.nightActionResult.push(`${role}:${userId}:${targetId}`);
+      }
+    } else {
+      game.nightActionResult.push(`${role}:${userId}:${targetId}`);
+    }
 
     switch (role) {
       case RoleType.KNIGHT:
@@ -903,9 +931,28 @@ export class GameManager {
           ? `**<@${targetId}>** は死亡しています。陣営: **${getFortuneResult(game.players.get(targetId)!.role)}**`
           : `**<@${targetId}>** は生存しています。`;
       case RoleType.WEREWOLF: {
-        const aliveWolfCount = game.participants.filter((p) => game.players.get(p)?.role === RoleType.WEREWOLF && game.players.get(p)?.isAlive).length;
-        const extra = aliveWolfCount > 1 ? "\n（複数の人狼がいる場合、最後に選択した人の対象が襲撃されます）" : "";
-        return `**<@${targetId}>** を襲撃対象に選びました。${extra}`;
+        const aliveWolfIds = game.participants.filter((p) => game.players.get(p)?.role === RoleType.WEREWOLF && game.players.get(p)?.isAlive);
+        const wolfVotes = game.nightActionResult.filter((a) => a.startsWith("werewolf:"));
+        const votedWolfIds = new Set(wolfVotes.map((a) => a.split(":")[1]));
+        const remaining = aliveWolfIds.length - votedWolfIds.size;
+
+        const voteCounts: Record<string, number> = {};
+        for (const a of wolfVotes) {
+          const tid = a.split(":")[2];
+          voteCounts[tid] = (voteCounts[tid] || 0) + 1;
+        }
+        const tallyLines = Object.entries(voteCounts)
+          .sort(([, a], [, b]) => b - a)
+          .map(([tid, c]) => `<@${tid}>: ${c}票`)
+          .join("\n");
+
+        let msg = `**<@${targetId}>** に投票しました。\n\n**📊 現在の得票:**\n${tallyLines}`;
+        if (remaining > 0) {
+          msg += `\n\n⏳ 全人狼の投票が揃うまでお待ちください。（残り${remaining}票）`;
+        } else {
+          msg += `\n\n🎯 全人狼の投票が揃いました！襲撃対象が決定しました。`;
+        }
+        return msg;
       }
       default:
         return "アクションを記録しました。";
@@ -924,7 +971,19 @@ export class GameManager {
 
     const werewolfActions = game.nightActionResult.filter((a) => a.startsWith("werewolf:"));
     if (werewolfActions.length > 0) {
-      const [, , targetId] = werewolfActions[werewolfActions.length - 1].split(":");
+      const voteCounts = new Map<string, number>();
+      for (const a of werewolfActions) {
+        const tid = a.split(":")[2];
+        voteCounts.set(tid, (voteCounts.get(tid) || 0) + 1);
+      }
+      let maxCount = 0;
+      let targetId = "";
+      for (const [tid, count] of voteCounts) {
+        if (count > maxCount) {
+          maxCount = count;
+          targetId = tid;
+        }
+      }
       if (targetId) {
         const tp = game.players.get(targetId);
         if (tp) {

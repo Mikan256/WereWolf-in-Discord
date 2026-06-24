@@ -1,5 +1,4 @@
-import * as fs from "fs";
-import * as path from "path";
+import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { RoleType } from "../game/types";
 
 export interface PersistedSettings {
@@ -11,53 +10,87 @@ export interface PersistedSettings {
 }
 
 export class PersistenceManager {
-  private filePath: string;
   private data: Map<string, PersistedSettings> = new Map();
+  private s3: S3Client | null = null;
+  private bucket: string;
+  private key: string;
 
-  constructor(filePath: string) {
-    this.filePath = filePath;
-    this.load();
+  constructor() {
+    this.bucket = process.env.KOYEB_S3_BUCKET || "";
+    this.key = process.env.KOYEB_S3_KEY || "settings.json";
+    if (this.bucket) {
+      this.s3 = new S3Client({
+        region: process.env.KOYEB_S3_REGION || "us-east-1",
+        endpoint: process.env.KOYEB_S3_ENDPOINT,
+        credentials: {
+          accessKeyId: process.env.KOYEB_S3_ACCESS_KEY || "",
+          secretAccessKey: process.env.KOYEB_S3_SECRET_KEY || "",
+        },
+        forcePathStyle: true,
+      });
+    }
   }
 
-  private load(): void {
+  async init(): Promise<void> {
+    await this.load();
+  }
+
+  private async load(): Promise<void> {
+    if (!this.s3) return;
     try {
-      if (fs.existsSync(this.filePath)) {
-        const raw = fs.readFileSync(this.filePath, "utf-8");
-        const parsed = JSON.parse(raw) as Record<string, PersistedSettings>;
+      const response = await this.s3.send(new GetObjectCommand({ Bucket: this.bucket, Key: this.key }));
+      const body = await response.Body?.transformToString("utf-8");
+      if (body) {
+        const parsed = JSON.parse(body) as Record<string, PersistedSettings>;
         for (const [guildId, settings] of Object.entries(parsed)) {
           this.data.set(guildId, settings);
         }
+        console.log(`[Persistence] Loaded ${Object.keys(parsed).length} guild(s) from S3`);
       }
-    } catch (e) {
-      console.error("Failed to load persisted settings:", e);
+    } catch (e: any) {
+      if (e.name === "NoSuchKey") {
+        console.log("[Persistence] No saved settings in S3, starting fresh");
+      } else {
+        console.error("[Persistence] Failed to load from S3:", e);
+      }
     }
   }
 
-  private save(): void {
-    try {
-      const dir = path.dirname(this.filePath);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      const obj: Record<string, PersistedSettings> = {};
-      for (const [guildId, settings] of this.data) {
-        obj[guildId] = settings;
-      }
-      fs.writeFileSync(this.filePath, JSON.stringify(obj, null, 2), "utf-8");
-    } catch (e) {
-      console.error("Failed to save persisted settings:", e);
+  private async save(): Promise<void> {
+    if (!this.s3) return;
+    const obj: Record<string, PersistedSettings> = {};
+    for (const [guildId, settings] of this.data) {
+      obj[guildId] = settings;
     }
+    await this.s3.send(new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: this.key,
+      Body: JSON.stringify(obj, null, 2),
+      ContentType: "application/json",
+    }));
   }
 
   getSettings(guildId: string): PersistedSettings | undefined {
     return this.data.get(guildId);
   }
 
-  setSettings(guildId: string, settings: PersistedSettings): void {
+  async setSettings(guildId: string, settings: PersistedSettings): Promise<void> {
     this.data.set(guildId, settings);
-    this.save();
+    try {
+      await this.save();
+    } catch (e) {
+      console.error("[Persistence] Failed to save to S3:", e);
+      throw new Error("設定の保存に失敗しました。");
+    }
   }
 
-  deleteSettings(guildId: string): void {
+  async deleteSettings(guildId: string): Promise<void> {
     this.data.delete(guildId);
-    this.save();
+    try {
+      await this.save();
+    } catch (e) {
+      console.error("[Persistence] Failed to save to S3:", e);
+      throw new Error("設定の保存に失敗しました。");
+    }
   }
 }

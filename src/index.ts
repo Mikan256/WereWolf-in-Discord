@@ -21,54 +21,61 @@ import * as skipCommand from "./commands/skip";
 import * as endCommand from "./commands/end";
 import * as helpCommand from "./commands/help";
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.DirectMessages,
-  ],
-});
+async function main() {
+  const persistence = new PersistenceManager();
+  await persistence.init();
+  console.log("[Bot] Persistence initialized");
 
-const persistence = new PersistenceManager("data/settings.json");
-const gameManager = new GameManager(client, persistence);
+  const client = new Client({
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent,
+      GatewayIntentBits.GuildVoiceStates,
+      GatewayIntentBits.GuildMembers,
+      GatewayIntentBits.DirectMessages,
+    ],
+  });
 
-const commands = new Collection<string, any>();
-commands.set(settingCommand.data.name, settingCommand);
-commands.set(settingStatusCommand.data.name, settingStatusCommand);
-commands.set(startCommand.data.name, startCommand);
-commands.set(stopCommand.data.name, stopCommand);
-commands.set(skipCommand.data.name, skipCommand);
-commands.set(endCommand.data.name, endCommand);
-commands.set(helpCommand.data.name, helpCommand);
+  const gameManager = new GameManager(client, persistence);
 
-client.once(Events.ClientReady, (c) => {
-  console.log(`${c.user.tag} としてログインしました！`);
-  c.user.setActivity("/setting で人狼を始めよう！", { type: 3 });
-});
+  const commands = new Collection<string, any>();
+  commands.set(settingCommand.data.name, settingCommand);
+  commands.set(settingStatusCommand.data.name, settingStatusCommand);
+  commands.set(startCommand.data.name, startCommand);
+  commands.set(stopCommand.data.name, stopCommand);
+  commands.set(skipCommand.data.name, skipCommand);
+  commands.set(endCommand.data.name, endCommand);
+  commands.set(helpCommand.data.name, helpCommand);
 
-client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-  if (!interaction.guildId) {
-    await interaction.reply({ content: "このコマンドはサーバー内でのみ使用できます。", flags: EPHEMERAL });
-    return;
-  }
+  client.once(Events.ClientReady, (c) => {
+    console.log(`${c.user.tag} としてログインしました！`);
+    c.user.setActivity("/setting で人狼を始めよう！", { type: 3 });
+  });
 
-  const command = commands.get(interaction.commandName);
-  if (!command) return;
-
-  try {
-    await command.execute(interaction, gameManager);
-  } catch (error) {
-    console.error(error);
-    if (interaction.replied || interaction.deferred) {
-      await interaction.editReply({ content: "コマンド実行中にエラーが発生しました。", components: [] }).catch(() => {});
-    } else if (!interaction.replied) {
-      await interaction.reply({ content: "コマンド実行中にエラーが発生しました。", flags: EPHEMERAL }).catch(() => {});
+  client.on(Events.InteractionCreate, async (interaction) => {
+    if (!interaction.isChatInputCommand()) return;
+    if (!interaction.guildId) {
+      await interaction.reply({ content: "このコマンドはサーバー内でのみ使用できます。", flags: EPHEMERAL });
+      return;
     }
-  }
-});
 
-client.login(TOKEN);
+    const command = commands.get(interaction.commandName);
+    if (!command) return;
+
+    try {
+      await command.execute(interaction, gameManager);
+    } catch (error) {
+      console.error(error);
+      if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({ content: "コマンド実行中にエラーが発生しました。", components: [] }).catch(() => {});
+      } else if (!interaction.replied) {
+        await interaction.reply({ content: "コマンド実行中にエラーが発生しました。", flags: EPHEMERAL }).catch(() => {});
+      }
+    }
+  });
+
+  await client.login(TOKEN);
+}
+
+main().catch(console.error);
