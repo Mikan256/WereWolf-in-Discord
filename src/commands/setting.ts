@@ -12,7 +12,7 @@ import {
   MessageComponentInteraction,
 } from "discord.js";
 import { GameManager } from "../game/GameManager";
-import { RoleType } from "../game/types";
+import { GameMode, RoleType } from "../game/types";
 
 const EPHEMERAL = 64;
 
@@ -39,6 +39,7 @@ interface InteractiveState {
   page: Page;
   selectedRoleKey: string | null;
   anonymousVoting: boolean;
+  gameMode: GameMode;
 }
 
 export const data = new SlashCommandBuilder()
@@ -59,7 +60,16 @@ export const data = new SlashCommandBuilder()
   .addIntegerOption((o) => o.setName("猫又").setDescription("猫又の数").setRequired(false).setMinValue(0).setMaxValue(2))
   .addIntegerOption((o) => o.setName("黒猫").setDescription("黒猫の数").setRequired(false).setMinValue(0).setMaxValue(2))
   .addIntegerOption((o) => o.setName("会議時間").setDescription("会議時間(分)").setRequired(false).setMinValue(1).setMaxValue(30))
-  .addBooleanOption((o) => o.setName("匿名投票").setDescription("投票結果を匿名にする（デフォルト: true）").setRequired(false));
+  .addBooleanOption((o) => o.setName("匿名投票").setDescription("投票結果を匿名にする（デフォルト: true）").setRequired(false))
+  .addStringOption((o) =>
+    o.setName("ゲームモード")
+      .setDescription("ゲームモードを選択（デフォルト: 通常人狼）")
+      .setRequired(false)
+      .addChoices(
+        { name: "通常人狼", value: "classic" },
+        { name: "ワンナイト人狼", value: "oneten" },
+      )
+  );
 
 function parseMentions(raw: string): string[] {
   const ids: string[] = [];
@@ -85,8 +95,13 @@ async function executeWithArgs(
   participantsRaw: string,
 ) {
   const participantIds = parseMentions(participantsRaw);
-  if (participantIds.length < 4) {
-    await interaction.reply({ content: "最低4人以上の参加者が必要です。", flags: EPHEMERAL });
+
+  const modeStr = interaction.options.getString("ゲームモード") ?? "classic";
+  const gameMode: GameMode = modeStr === "oneten" ? GameMode.ONENIGHT : GameMode.CLASSIC;
+  const minPlayers = gameMode === GameMode.ONENIGHT ? 3 : 4;
+
+  if (participantIds.length < minPlayers) {
+    await interaction.reply({ content: `最低${minPlayers}人以上の参加者が必要です。`, flags: EPHEMERAL });
     return;
   }
 
@@ -110,10 +125,12 @@ async function executeWithArgs(
     opt("てるてる坊主"), opt("猫又"), opt("黒猫"),
     optOrDefault("会議時間", 3),
     anonymousVoting,
+    gameMode,
   );
 
+  const modeName = gameMode === GameMode.CLASSIC ? "通常人狼" : "ワンナイト人狼";
   const s =
-    `**設定完了**\n参加者: ${participantIds.length}人\n` +
+    `**設定完了**\nモード: ${modeName}\n参加者: ${participantIds.length}人\n` +
     `人狼: ${optOrDefault("人狼", 1)} / 共犯者: ${opt("共犯者")} / 狂人: ${opt("狂人")} / 狂信者: ${opt("狂信者")}\n` +
     `妖狐: ${opt("妖狐")} / 占い師: ${optOrDefault("占い師", 1)} / 霊媒師: ${opt("霊媒師")} / 騎士: ${opt("騎士")}\n` +
     `てるてる坊主: ${opt("てるてる坊主")} / 猫又: ${opt("猫又")} / 黒猫: ${opt("黒猫")}\n` +
@@ -124,13 +141,23 @@ async function executeWithArgs(
 }
 
 async function executeInteractive(interaction: ChatInputCommandInteraction, gameManager: GameManager) {
+  const loaded = gameManager.loadSettings(interaction.guildId!);
+  const defaultRoleCounts = Object.fromEntries(ROLE_OPTIONS.map((r) => [r.key, r.default]));
+  if (loaded) {
+    for (const [role, count] of Object.entries(loaded.settings.roleDistribution)) {
+      const key = ROLE_OPTIONS.find((r) => r.role === role)?.key;
+      if (key) defaultRoleCounts[key] = count as number;
+    }
+  }
+
   const state: InteractiveState = {
-    participants: [],
-    roleCounts: Object.fromEntries(ROLE_OPTIONS.map((r) => [r.key, r.default])),
-    meetingMinutes: 3,
+    participants: loaded?.participants ?? [],
+    roleCounts: defaultRoleCounts,
+    meetingMinutes: loaded?.settings.meetingTimeMinutes ?? 3,
     page: "main",
     selectedRoleKey: null,
-    anonymousVoting: true,
+    anonymousVoting: loaded?.settings.anonymousVoting ?? true,
+    gameMode: loaded?.settings.gameMode ?? GameMode.CLASSIC,
   };
 
   const userId = interaction.user.id;
@@ -163,10 +190,12 @@ async function executeInteractive(interaction: ChatInputCommandInteraction, game
 }
 
 function buildEmbed(state: InteractiveState): EmbedBuilder {
+  const modeName = state.gameMode === GameMode.CLASSIC ? "通常人狼" : "ワンナイト人狼";
   return new EmbedBuilder()
     .setTitle("人狼 設定パネル")
-    .setColor(0x00ff00)
+    .setColor(state.gameMode === GameMode.CLASSIC ? 0x00ff00 : 0xff9900)
     .addFields(
+      { name: "ゲームモード", value: modeName, inline: true },
       { name: "参加者", value: state.participants.length > 0 ? `${state.participants.length}人` : "未設定", inline: true },
       { name: "会議時間", value: `${state.meetingMinutes}分`, inline: true },
       { name: "投票表示", value: state.anonymousVoting ? "匿名" : "公開", inline: true },
@@ -176,25 +205,31 @@ function buildEmbed(state: InteractiveState): EmbedBuilder {
 
 async function render(interaction: ChatInputCommandInteraction, state: InteractiveState) {
   if (state.page === "main") {
+    const modeLabel = state.gameMode === GameMode.CLASSIC ? "モード: 通常人狼" : "モード: ワンナイト人狼";
     const row1 = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId("set_participants").setLabel("参加者を設定").setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId("set_roles").setLabel("役職を設定").setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId("set_time").setLabel("会議時間").setStyle(ButtonStyle.Primary),
     );
     const toggleLabel = state.anonymousVoting ? "投票公開: 匿名" : "投票公開: 公開";
+    const modeStyle = state.gameMode === GameMode.CLASSIC ? ButtonStyle.Secondary : ButtonStyle.Success;
     const row2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId("toggle_mode").setLabel(modeLabel).setStyle(modeStyle),
       new ButtonBuilder().setCustomId("toggle_anonymous").setLabel(toggleLabel).setStyle(ButtonStyle.Secondary),
+    );
+    const row3 = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId("save").setLabel("保存").setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId("cancel").setLabel("キャンセル").setStyle(ButtonStyle.Danger),
     );
-    await interaction.editReply({ embeds: [buildEmbed(state)], components: [row1, row2] });
+    await interaction.editReply({ embeds: [buildEmbed(state)], components: [row1, row2, row3] });
   } else if (state.page === "select_participants") {
     const guild = interaction.guild!;
     const members = [...guild.members.cache.values()].filter((m) => !m.user.bot).slice(0, 25);
+    const minPlayers = state.gameMode === GameMode.ONENIGHT ? 3 : 4;
     const select = new StringSelectMenuBuilder()
       .setCustomId("pick")
-      .setPlaceholder("参加者を選んでください（最低4人）")
-      .setMinValues(4)
+      .setPlaceholder(`参加者を選んでください（最低${minPlayers}人）`)
+      .setMinValues(minPlayers)
       .setMaxValues(members.length)
       .addOptions(
         members.map((m) =>
@@ -204,7 +239,7 @@ async function render(interaction: ChatInputCommandInteraction, state: Interacti
     const back = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId("back").setLabel("戻る").setStyle(ButtonStyle.Secondary),
     );
-    await interaction.editReply({ content: "参加者を選んでください（最低4人）", embeds: [], components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select), back] });
+    await interaction.editReply({ content: `参加者を選んでください（最低${minPlayers}人）`, embeds: [], components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select), back] });
   } else if (state.page === "select_role") {
     const select = new StringSelectMenuBuilder()
       .setCustomId("pick")
@@ -271,8 +306,9 @@ async function handleMainAction(
   }
 
   if (ci.customId === "save") {
-    if (state.participants.length < 4) {
-      await ci.reply({ content: "参加者が4人未満です。", flags: EPHEMERAL });
+    const minPlayers = state.gameMode === GameMode.ONENIGHT ? 3 : 4;
+    if (state.participants.length < minPlayers) {
+      await ci.reply({ content: `参加者が${minPlayers}人未満です。`, flags: EPHEMERAL });
       return true;
     }
     await ci.deferUpdate();
@@ -283,9 +319,10 @@ async function handleMainAction(
         get("人狼"), get("共犯者"), get("狂人"), get("狂信者"),
         get("妖狐"), get("占い師"), get("霊媒師"), get("騎士"),
         get("てるてる坊主"), get("猫又"), get("黒猫"),
-        state.meetingMinutes, state.anonymousVoting,
+        state.meetingMinutes, state.anonymousVoting, state.gameMode,
       );
-      await ci.editReply({ content: result, embeds: [], components: [] });
+      const modeName = state.gameMode === GameMode.CLASSIC ? "通常人狼" : "ワンナイト人狼";
+      await ci.editReply({ content: `**設定完了**\nモード: ${modeName}\n${result}`, embeds: [], components: [] });
     } catch (e) {
       console.error("Save error:", e);
       await ci.editReply({ content: "設定の保存中にエラーが発生しました。", embeds: [], components: [] }).catch(() => {});
@@ -295,6 +332,12 @@ async function handleMainAction(
 
   if (ci.customId === "toggle_anonymous") {
     state.anonymousVoting = !state.anonymousVoting;
+    await ci.deferUpdate();
+    return true;
+  }
+
+  if (ci.customId === "toggle_mode") {
+    state.gameMode = state.gameMode === GameMode.CLASSIC ? GameMode.ONENIGHT : GameMode.CLASSIC;
     await ci.deferUpdate();
     return true;
   }

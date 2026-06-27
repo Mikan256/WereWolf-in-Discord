@@ -33,6 +33,12 @@ export function getRoleName(role: RoleType): string {
     [RoleType.TERU_TERU]: "てるてる坊主",
     [RoleType.NEKOMATA]: "猫又",
     [RoleType.BLACK_CAT]: "黒猫",
+    [RoleType.ROBBER]: "怪盗",
+    [RoleType.TROUBLEMAKER]: "トラブルメーカー",
+    [RoleType.DRUNK]: "酔っ払い",
+    [RoleType.INSOMNIAC]: "失眠症",
+    [RoleType.HUNTER_ONENIGHT]: "狩人",
+    [RoleType.TANNER]: "皮なめし職人",
   };
   return names[role];
 }
@@ -63,6 +69,18 @@ export function getRoleDescription(role: RoleType): string {
       "あなたは猫又です。投票で死亡した場合、ランダムに一人道連れにします。人狼に殺された場合、人狼からランダムに一人道連れにします。騎士の守護は無効です。",
     [RoleType.BLACK_CAT]:
       "あなたは黒猫です。投票で死亡した場合、人狼陣営を除いたプレイヤーからランダムに一人道連れにします。",
+    [RoleType.ROBBER]:
+      "あなたは怪盗です。夜に他のプレイヤー1人と役職カードを交換できます。交換後、自分の新しい役職を確認できます。",
+    [RoleType.TROUBLEMAKER]:
+      "あなたはトラブルメーカーです。夜に自分以外のプレイヤー2人を選び、その役職カードを交換します。中身は見えません。",
+    [RoleType.DRUNK]:
+      "あなたは酔っ払いです。夜に自分の役職カードをセンターカードのいずれか1枚と交換します。中身は見えません。",
+    [RoleType.INSOMNIAC]:
+      "あなたは失眠症です。夜の最後に自分の現在の役職を確認できます。自分が交換されたかどうかを知ることができます。",
+    [RoleType.HUNTER_ONENIGHT]:
+      "あなたは狩人です。投票で追放された場合、自分に投票したプレイヤーの中からランダムに1人道連れにします。",
+    [RoleType.TANNER]:
+      "あなたは皮なめし職人です。自分が追放されると単独勝利します。追放されることを目指しましょう。",
   };
   return descriptions[role];
 }
@@ -98,4 +116,36 @@ export function getFortuneResult(role: RoleType): string {
   if (role === RoleType.ACCOMPLICE) return "市民陣營"; // disguised
   if (role === RoleType.FOX) return "第三陣営";
   return "市民陣営";
+}
+
+const ONENIGHT_ROLE_NAMES: Partial<Record<RoleType, string>> = {
+  [RoleType.ROBBER]: "怪盗",
+  [RoleType.TROUBLEMAKER]: "トラブルメーカー",
+  [RoleType.DRUNK]: "酔っ払い",
+  [RoleType.INSOMNIAC]: "失眠症",
+  [RoleType.HUNTER_ONENIGHT]: "狩人",
+  [RoleType.TANNER]: "皮なめし職人",
+};
+
+export function getOneNightRoleName(role: RoleType): string {
+  return ONENIGHT_ROLE_NAMES[role] ?? getRoleName(role);
+}
+
+const ONENIGHT_ROLE_DESCRIPTIONS: Partial<Record<RoleType, string>> = {
+  [RoleType.ROBBER]:
+    "あなたは怪盗です。夜に他のプレイヤー1人と役職カードを交換できます。交換後、自分の新しい役職を確認できます。",
+  [RoleType.TROUBLEMAKER]:
+    "あなたはトラブルメーカーです。夜に自分以外のプレイヤー2人を選び、その役職カードを交換します。中身は見えません。",
+  [RoleType.DRUNK]:
+    "あなたは酔っ払いです。夜に自分の役職カードをセンターカードのいずれか1枚と交換します。中身は見えません。",
+  [RoleType.INSOMNIAC]:
+    "あなたは失眠症です。夜の最後に自分の現在の役職を確認できます。自分が交換されたかどうかを知ることができます。",
+  [RoleType.HUNTER_ONENIGHT]:
+    "あなたは狩人です。投票で追放された場合、自分に投票したプレイヤーの中からランダムに1人道連れにします。",
+  [RoleType.TANNER]:
+    "あなたは皮なめし職人です。自分が追放されると単独勝利します。追放されることを目指しましょう。",
+};
+
+export function getOneNightRoleDescription(role: RoleType): string {
+  return ONENIGHT_ROLE_DESCRIPTIONS[role] ?? getRoleDescription(role);
 }

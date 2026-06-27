@@ -1,3 +1,8 @@
+export enum GameMode {
+  CLASSIC = "classic",
+  ONENIGHT = "oneten",
+}
+
 export enum GamePhase {
   WAITING = "waiting",
   DAY_DISCUSSION = "day_discussion",
@@ -19,6 +24,13 @@ export enum RoleType {
   TERU_TERU = "teru_teru",
   NEKOMATA = "nekomata",
   BLACK_CAT = "black_cat",
+  // One Night roles
+  ROBBER = "robber",
+  TROUBLEMAKER = "troublemaker",
+  DRUNK = "drunk",
+  INSOMNIAC = "insomniac",
+  HUNTER_ONENIGHT = "hunter_one_night",
+  TANNER = "tanner",
 }
 
 export enum Team {
@@ -36,6 +48,7 @@ export interface RoleInfo {
 }
 
 export interface GameSettings {
+  gameMode: GameMode;
   meetingTimeMinutes: number;
   roleDistribution: Partial<Record<RoleType, number>>;
   anonymousVoting: boolean;
@@ -47,6 +60,13 @@ export interface PlayerState {
   team: Team;
   isAlive: boolean;
   isProtected: boolean;
+}
+
+export interface OneNightSwap {
+  kind: "player_player" | "player_center";
+  actorId: string;
+  targetId?: string;
+  centerIndex?: number;
 }
 
 export interface GameState {
@@ -66,7 +86,77 @@ export interface GameState {
   nightActionResult: string[];
   meetingTimer: NodeJS.Timeout | null;
   nightActionTimeout: NodeJS.Timeout | null;
+  // One Night specific
+  centerRoles: RoleType[];
+  nightActionStep: number;
+  originalRoles: Map<string, RoleType>;
 }
+
+export const ONENIGHT_ROLE_DEFINITIONS: Partial<Record<RoleType, RoleInfo>> = {
+  [RoleType.VILLAGER]: {
+    type: RoleType.VILLAGER,
+    name: "市民",
+    team: Team.VILLAGER,
+    description: "特殊な能力はありません。議論と投票で人狼を見つけ出しましょう。",
+    winCondition: "追放されたプレイヤーが人狼であること。",
+  },
+  [RoleType.WEREWOLF]: {
+    type: RoleType.WEREWOLF,
+    name: "人狼",
+    team: Team.WEREWOLF,
+    description: "夜に他の人狼が誰かを確認できます。自分が人狼であることを隠して議論をかく乱しましょう。",
+    winCondition: "追放されたプレイヤーが人狼でないこと。",
+  },
+  [RoleType.FORTUNE_TELLER]: {
+    type: RoleType.FORTUNE_TELLER,
+    name: "占い師",
+    team: Team.VILLAGER,
+    description: "夜にプレイヤー1人の役職カードを見るか、センターカード2枚を確認できます。",
+    winCondition: "追放されたプレイヤーが人狼であること。",
+  },
+  [RoleType.ROBBER]: {
+    type: RoleType.ROBBER,
+    name: "怪盗",
+    team: Team.VILLAGER,
+    description: "夜に他のプレイヤー1人と役職カードを交換し、交換後の自分の役職を確認します。交換された相手は気づきません。",
+    winCondition: "追放されたプレイヤーが人狼であること。",
+  },
+  [RoleType.TROUBLEMAKER]: {
+    type: RoleType.TROUBLEMAKER,
+    name: "トラブルメーカー",
+    team: Team.VILLAGER,
+    description: "夜に自分以外のプレイヤー2人を選び、その役職カードを交換します。中身は見えません。",
+    winCondition: "追放されたプレイヤーが人狼であること。",
+  },
+  [RoleType.DRUNK]: {
+    type: RoleType.DRUNK,
+    name: "酔っ払い",
+    team: Team.VILLAGER,
+    description: "夜に自分の役職カードをセンターカードのいずれか1枚と交換します。中身は見えません。",
+    winCondition: "追放されたプレイヤーが人狼であること。",
+  },
+  [RoleType.INSOMNIAC]: {
+    type: RoleType.INSOMNIAC,
+    name: "失眠症",
+    team: Team.VILLAGER,
+    description: "夜の最後に自分の現在の役職を確認します。自分が交換されたかどうかを知ることができます。",
+    winCondition: "追放されたプレイヤーが人狼であること。",
+  },
+  [RoleType.HUNTER_ONENIGHT]: {
+    type: RoleType.HUNTER_ONENIGHT,
+    name: "狩人",
+    team: Team.VILLAGER,
+    description: "投票で追放された場合、自分に投票したプレイヤーの中からランダムに1人道連れにします。",
+    winCondition: "追放されたプレイヤーが人狼であること。",
+  },
+  [RoleType.TANNER]: {
+    type: RoleType.TANNER,
+    name: "皮なめし職人",
+    team: Team.THIRD,
+    description: "自分が追放されると単独勝利します。いかに自分が追放されるかが鍵です。",
+    winCondition: "会議の投票で自分が追放されること。",
+  },
+};
 
 export const ROLE_DEFINITIONS: Record<RoleType, RoleInfo> = {
   [RoleType.VILLAGER]: {
@@ -164,5 +254,47 @@ export const ROLE_DEFINITIONS: Record<RoleType, RoleInfo> = {
     description:
       "会議の投票によって死亡した場合は人狼陣営を除いたプレイヤーの中からランダムに一人道連れにします。(騎士による守りは発動不可)",
     winCondition: "市民陣営の数が人狼陣営の数の同数以下になること。",
+  },
+  [RoleType.ROBBER]: {
+    type: RoleType.ROBBER,
+    name: "怪盗",
+    team: Team.VILLAGER,
+    description: "夜に他のプレイヤー1人と役職カードを交換し、交換後の自分の役職を確認します。",
+    winCondition: "追放されたプレイヤーが人狼であること。",
+  },
+  [RoleType.TROUBLEMAKER]: {
+    type: RoleType.TROUBLEMAKER,
+    name: "トラブルメーカー",
+    team: Team.VILLAGER,
+    description: "夜に自分以外のプレイヤー2人を選び、その役職カードを交換します。中身は見えません。",
+    winCondition: "追放されたプレイヤーが人狼であること。",
+  },
+  [RoleType.DRUNK]: {
+    type: RoleType.DRUNK,
+    name: "酔っ払い",
+    team: Team.VILLAGER,
+    description: "夜に自分の役職カードをセンターカードのいずれか1枚と交換します。中身は見えません。",
+    winCondition: "追放されたプレイヤーが人狼であること。",
+  },
+  [RoleType.INSOMNIAC]: {
+    type: RoleType.INSOMNIAC,
+    name: "失眠症",
+    team: Team.VILLAGER,
+    description: "夜の最後に自分の現在の役職を確認します。自分が交換されたかどうかを知ることができます。",
+    winCondition: "追放されたプレイヤーが人狼であること。",
+  },
+  [RoleType.HUNTER_ONENIGHT]: {
+    type: RoleType.HUNTER_ONENIGHT,
+    name: "狩人",
+    team: Team.VILLAGER,
+    description: "投票で追放された場合、自分に投票したプレイヤーの中からランダムに1人道連れにします。",
+    winCondition: "追放されたプレイヤーが人狼であること。",
+  },
+  [RoleType.TANNER]: {
+    type: RoleType.TANNER,
+    name: "皮なめし職人",
+    team: Team.THIRD,
+    description: "自分が追放されると単独勝利します。",
+    winCondition: "会議の投票で自分が追放されること。",
   },
 };

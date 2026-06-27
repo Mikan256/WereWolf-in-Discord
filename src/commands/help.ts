@@ -9,12 +9,17 @@ export const data = new SlashCommandBuilder()
   .addStringOption((o) =>
     o.setName("項目")
       .setDescription("表示する項目 (省略可)")
-      .addChoices({ name: "役職一覧", value: "roles" })
+      .addChoices(
+        { name: "通常人狼 役職一覧", value: "classic_roles" },
+        { name: "通常人狼 ルール説明", value: "classic_rules" },
+        { name: "ワンナイト人狼 役職一覧", value: "oneten_roles" },
+        { name: "ワンナイト人狼 ルール説明", value: "oneten_rules" },
+      )
   );
 
 export async function execute(interaction: ChatInputCommandInteraction, gameManager: GameManager) {
   const item = interaction.options.getString("項目");
-  const result = await gameManager.getHelp(item ?? undefined);
+  const result = await gameManager.getHelp(interaction.guildId, item ?? undefined);
   if (result.length > 2000) {
     const chunks = [];
     for (let i = 0; i < result.length; i += 1900) {

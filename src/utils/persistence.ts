@@ -1,5 +1,5 @@
 import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
-import { RoleType } from "../game/types";
+import { GameMode, RoleType } from "../game/types";
 
 export interface PersistedSettings {
   hostUserId: string;
@@ -7,6 +7,7 @@ export interface PersistedSettings {
   roleDistribution: Partial<Record<RoleType, number>>;
   meetingTimeMinutes: number;
   anonymousVoting: boolean;
+  gameMode?: GameMode;
 }
 
 export class PersistenceManager {
