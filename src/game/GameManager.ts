@@ -322,6 +322,8 @@ export class GameManager {
     const gameVoice = guild.channels.cache.get(game.gameVoiceChannelId!) as VoiceChannel;
     if (gameVoice) {
       for (const pid of game.participants) {
+        const player = game.players.get(pid);
+        if (!player?.isAlive) continue;
         try {
           const member = await guild.members.fetch(pid);
           if (member.voice.channelId === gameVoice.id) await member.voice.setMute(false);
@@ -1242,5 +1244,28 @@ export class GameManager {
   getHostUserId(guildId: string): string | null {
     const game = this.games.get(guildId);
     return game ? game.hostUserId : null;
+  }
+
+  getActiveGameGuildIds(): string[] {
+    const ids: string[] = [];
+    for (const [guildId, game] of this.games) {
+      if (game.phase !== GamePhase.WAITING && game.phase !== GamePhase.FINISHED) {
+        ids.push(guildId);
+      }
+    }
+    return ids;
+  }
+
+  async muteSpectator(memberId: string, channelId: string, guild: Guild): Promise<void> {
+    for (const gid of this.getActiveGameGuildIds()) {
+      const game = this.games.get(gid)!;
+      if (game.waitingVoiceChannelId === channelId && !game.participants.includes(memberId)) {
+        try {
+          const member = await guild.members.fetch(memberId);
+          await member.voice.setMute(true);
+          console.log(`[Game ${gid.slice(0, 8)}] Server-muted spectator ${memberId} in waiting VC`);
+        } catch {}
+      }
+    }
   }
 }

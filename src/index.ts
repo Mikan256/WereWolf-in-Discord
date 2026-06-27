@@ -75,6 +75,12 @@ async function main() {
     }
   });
 
+  client.on(Events.VoiceStateUpdate, (oldState, newState) => {
+    if (!newState.channelId || !newState.guild) return;
+    if (oldState.channelId === newState.channelId) return;
+    gameManager.muteSpectator(newState.id, newState.channelId, newState.guild);
+  });
+
   await client.login(TOKEN);
 }
 
