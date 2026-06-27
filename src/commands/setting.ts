@@ -68,6 +68,7 @@ export const data = new SlashCommandBuilder()
       .addChoices(
         { name: "通常人狼", value: "classic" },
         { name: "ワンナイト人狼", value: "oneten" },
+        { name: "ギシンアンキ(二人用人狼)", value: "gishinanki" },
       )
   );
 
@@ -97,8 +98,8 @@ async function executeWithArgs(
   const participantIds = parseMentions(participantsRaw);
 
   const modeStr = interaction.options.getString("ゲームモード") ?? "classic";
-  const gameMode: GameMode = modeStr === "oneten" ? GameMode.ONENIGHT : GameMode.CLASSIC;
-  const minPlayers = gameMode === GameMode.ONENIGHT ? 3 : 4;
+  const gameMode: GameMode = modeStr === "oneten" ? GameMode.ONENIGHT : modeStr === "gishinanki" ? GameMode.GISHINANKI : GameMode.CLASSIC;
+  const minPlayers = gameMode === GameMode.CLASSIC ? 4 : gameMode === GameMode.ONENIGHT ? 3 : 2;
 
   if (participantIds.length < minPlayers) {
     await interaction.reply({ content: `最低${minPlayers}人以上の参加者が必要です。`, flags: EPHEMERAL });
@@ -128,12 +129,20 @@ async function executeWithArgs(
     gameMode,
   );
 
-  const modeName = gameMode === GameMode.CLASSIC ? "通常人狼" : "ワンナイト人狼";
+  const modeName = gameMode === GameMode.CLASSIC ? "通常人狼" : gameMode === GameMode.ONENIGHT ? "ワンナイト人狼" : "ギシンアンキ";
+
+  let detail = "";
+  if (gameMode === GameMode.GISHINANKI) {
+    detail = `参加者: ${participantIds.length}人\n（ギシンアンキは2人固定、役職は自動配布されます）`;
+  } else {
+    detail =
+      `人狼: ${optOrDefault("人狼", 1)} / 共犯者: ${opt("共犯者")} / 狂人: ${opt("狂人")} / 狂信者: ${opt("狂信者")}\n` +
+      `妖狐: ${opt("妖狐")} / 占い師: ${optOrDefault("占い師", 1)} / 霊媒師: ${opt("霊媒師")} / 騎士: ${opt("騎士")}\n` +
+      `てるてる坊主: ${opt("てるてる坊主")} / 猫又: ${opt("猫又")} / 黒猫: ${opt("黒猫")}\n`;
+  }
+
   const s =
-    `**設定完了**\nモード: ${modeName}\n参加者: ${participantIds.length}人\n` +
-    `人狼: ${optOrDefault("人狼", 1)} / 共犯者: ${opt("共犯者")} / 狂人: ${opt("狂人")} / 狂信者: ${opt("狂信者")}\n` +
-    `妖狐: ${opt("妖狐")} / 占い師: ${optOrDefault("占い師", 1)} / 霊媒師: ${opt("霊媒師")} / 騎士: ${opt("騎士")}\n` +
-    `てるてる坊主: ${opt("てるてる坊主")} / 猫又: ${opt("猫又")} / 黒猫: ${opt("黒猫")}\n` +
+    `**設定完了**\nモード: ${modeName}\n${detail}` +
     `会議時間: ${optOrDefault("会議時間", 3)}分\n` +
     `投票公開: ${anonymousVoting ? "匿名" : "公開"}`;
 
@@ -189,30 +198,45 @@ async function executeInteractive(interaction: ChatInputCommandInteraction, game
   }
 }
 
+function getModeName(mode: GameMode): string {
+  return mode === GameMode.CLASSIC ? "通常人狼" : mode === GameMode.ONENIGHT ? "ワンナイト人狼" : "ギシンアンキ";
+}
+
+function getModeColor(mode: GameMode): number {
+  return mode === GameMode.CLASSIC ? 0x00ff00 : mode === GameMode.ONENIGHT ? 0xff9900 : 0xaa00ff;
+}
+
 function buildEmbed(state: InteractiveState): EmbedBuilder {
-  const modeName = state.gameMode === GameMode.CLASSIC ? "通常人狼" : "ワンナイト人狼";
-  return new EmbedBuilder()
+  const isGishin = state.gameMode === GameMode.GISHINANKI;
+  const embed = new EmbedBuilder()
     .setTitle("人狼 設定パネル")
-    .setColor(state.gameMode === GameMode.CLASSIC ? 0x00ff00 : 0xff9900)
+    .setColor(getModeColor(state.gameMode))
     .addFields(
-      { name: "ゲームモード", value: modeName, inline: true },
+      { name: "ゲームモード", value: getModeName(state.gameMode), inline: true },
       { name: "参加者", value: state.participants.length > 0 ? `${state.participants.length}人` : "未設定", inline: true },
       { name: "会議時間", value: `${state.meetingMinutes}分`, inline: true },
       { name: "投票表示", value: state.anonymousVoting ? "匿名" : "公開", inline: true },
-      { name: "役職内訳", value: ROLE_OPTIONS.map((r) => `${r.key}: ${state.roleCounts[r.key]}人`).join("\n"), inline: false },
     );
+
+  if (isGishin) {
+    embed.addFields({ name: "役職", value: "自動配布（生存者×3/人間不信×2/人狼×2）", inline: false });
+  } else {
+    embed.addFields({ name: "役職内訳", value: ROLE_OPTIONS.map((r) => `${r.key}: ${state.roleCounts[r.key]}人`).join("\n"), inline: false });
+  }
+
+  return embed;
 }
 
 async function render(interaction: ChatInputCommandInteraction, state: InteractiveState) {
   if (state.page === "main") {
-    const modeLabel = state.gameMode === GameMode.CLASSIC ? "モード: 通常人狼" : "モード: ワンナイト人狼";
+    const modeLabel = `モード: ${getModeName(state.gameMode)}`;
     const row1 = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId("set_participants").setLabel("参加者を設定").setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId("set_roles").setLabel("役職を設定").setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId("set_time").setLabel("会議時間").setStyle(ButtonStyle.Primary),
     );
     const toggleLabel = state.anonymousVoting ? "投票公開: 匿名" : "投票公開: 公開";
-    const modeStyle = state.gameMode === GameMode.CLASSIC ? ButtonStyle.Secondary : ButtonStyle.Success;
+    const modeStyle = state.gameMode === GameMode.GISHINANKI ? ButtonStyle.Danger : state.gameMode === GameMode.ONENIGHT ? ButtonStyle.Success : ButtonStyle.Secondary;
     const row2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId("toggle_mode").setLabel(modeLabel).setStyle(modeStyle),
       new ButtonBuilder().setCustomId("toggle_anonymous").setLabel(toggleLabel).setStyle(ButtonStyle.Secondary),
@@ -225,7 +249,7 @@ async function render(interaction: ChatInputCommandInteraction, state: Interacti
   } else if (state.page === "select_participants") {
     const guild = interaction.guild!;
     const members = [...guild.members.cache.values()].filter((m) => !m.user.bot).slice(0, 25);
-    const minPlayers = state.gameMode === GameMode.ONENIGHT ? 3 : 4;
+    const minPlayers = state.gameMode === GameMode.CLASSIC ? 4 : state.gameMode === GameMode.ONENIGHT ? 3 : 2;
     const select = new StringSelectMenuBuilder()
       .setCustomId("pick")
       .setPlaceholder(`参加者を選んでください（最低${minPlayers}人）`)
@@ -306,7 +330,7 @@ async function handleMainAction(
   }
 
   if (ci.customId === "save") {
-    const minPlayers = state.gameMode === GameMode.ONENIGHT ? 3 : 4;
+    const minPlayers = state.gameMode === GameMode.CLASSIC ? 4 : state.gameMode === GameMode.ONENIGHT ? 3 : 2;
     if (state.participants.length < minPlayers) {
       await ci.reply({ content: `参加者が${minPlayers}人未満です。`, flags: EPHEMERAL });
       return true;
@@ -321,7 +345,7 @@ async function handleMainAction(
         get("てるてる坊主"), get("猫又"), get("黒猫"),
         state.meetingMinutes, state.anonymousVoting, state.gameMode,
       );
-      const modeName = state.gameMode === GameMode.CLASSIC ? "通常人狼" : "ワンナイト人狼";
+      const modeName = getModeName(state.gameMode);
       await ci.editReply({ content: `**設定完了**\nモード: ${modeName}\n${result}`, embeds: [], components: [] });
     } catch (e) {
       console.error("Save error:", e);
@@ -337,7 +361,9 @@ async function handleMainAction(
   }
 
   if (ci.customId === "toggle_mode") {
-    state.gameMode = state.gameMode === GameMode.CLASSIC ? GameMode.ONENIGHT : GameMode.CLASSIC;
+    const modes = [GameMode.CLASSIC, GameMode.ONENIGHT, GameMode.GISHINANKI];
+    const idx = modes.indexOf(state.gameMode);
+    state.gameMode = modes[(idx + 1) % modes.length];
     await ci.deferUpdate();
     return true;
   }

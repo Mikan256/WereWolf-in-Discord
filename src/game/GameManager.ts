@@ -22,6 +22,7 @@ import {
   Team,
   ROLE_DEFINITIONS,
   ONENIGHT_ROLE_DEFINITIONS,
+  GISHINANKI_ROLE_DEFINITIONS,
 } from "./types";
 import {
   distributeRoles,
@@ -73,6 +74,10 @@ export class GameManager {
       meetingTimer: null, nightActionTimeout: null,
       centerRoles: [], nightActionStep: 0,
       originalRoles: new Map(),
+      gishinDeck: [], gishinHands: new Map(),
+      gishinActionTokens: new Map(), gishinDecisions: new Map(),
+      gishinReady: [], gishinRequestPending: null,
+      gishinExchanges: false,
     };
     this.games.set(guildId, game);
     log(guildId, `Game created by <${hostUserId}>, settings loaded from persistence: ${!!persisted}`);
@@ -97,10 +102,13 @@ export class GameManager {
     if (game.hostUserId !== hostUserId) return "ホストのみが設定を変更できます。";
     if (game.phase !== GamePhase.WAITING) return "ゲームが進行中のため設定を変更できません。";
 
-    const total = werewolfCount + accompliceCount + madmanCount + fanaticCount +
-      foxCount + fortuneTellerCount + mediumCount + knightCount +
-      teruTeruCount + nekomataCount + blackCatCount;
-    if (total > participants.length) return "参加者数より役職数の合計が多いです。";
+    const isGishinAnki = gameMode === GameMode.GISHINANKI;
+    if (!isGishinAnki) {
+      const total = werewolfCount + accompliceCount + madmanCount + fanaticCount +
+        foxCount + fortuneTellerCount + mediumCount + knightCount +
+        teruTeruCount + nekomataCount + blackCatCount;
+      if (total > participants.length) return "参加者数より役職数の合計が多いです。";
+    }
 
     game.participants = participants;
     game.settings.roleDistribution = {};
@@ -141,8 +149,9 @@ export class GameManager {
     if (!game) return "設定が行われていません。先に `/setting` を行ってください。";
     if (game.hostUserId !== userId) return "ホストのみがゲームを開始できます。";
     if (game.phase !== GamePhase.WAITING) return "すでにゲームが開始されています。";
-    const minPlayers = game.settings.gameMode === GameMode.ONENIGHT ? 3 : 4;
+    const minPlayers = game.settings.gameMode === GameMode.ONENIGHT ? 3 : game.settings.gameMode === GameMode.GISHINANKI ? 2 : 4;
     if (game.participants.length < minPlayers) return `最低${minPlayers}人以上の参加者が必要です。`;
+    if (game.settings.gameMode === GameMode.GISHINANKI && game.participants.length > 2) return "ギシンアンキは2人専用です。";
     log(guildId, `Host <${userId}> starting game with ${game.participants.length} players (mode: ${game.settings.gameMode})`);
 
     const guild = this.client.guilds.cache.get(guildId);
@@ -150,6 +159,10 @@ export class GameManager {
 
     if (game.settings.gameMode === GameMode.ONENIGHT) {
       return this.startOneNightGame(guild, game);
+    }
+
+    if (game.settings.gameMode === GameMode.GISHINANKI) {
+      return this.startGishinAnkiGame(guild, game);
     }
 
     try {
@@ -920,6 +933,496 @@ export class GameManager {
 
   // ===== End One Night Werewolf =====
 
+  // ===== Gishin Anki (疑心暗鬼/二人用人狼) =====
+
+  private async startGishinAnkiGame(guild: Guild, game: GameState): Promise<string> {
+    game.phase = GamePhase.GISHIN_INFORMATION;
+    game.dayCount = 0;
+
+    const gameChannel = await guild.channels.create({
+      name: "ギシンアンキ", type: ChannelType.GuildText,
+      permissionOverwrites: [
+        { id: guild.roles.everyone.id, deny: ["ViewChannel"], type: OverwriteType.Role },
+        ...game.participants.map((pid) => ({
+          id: pid, allow: ["ViewChannel", "SendMessages"] as const, type: OverwriteType.Member as const,
+        })),
+      ],
+    });
+    game.gameTextChannelId = gameChannel.id;
+
+    await gameChannel.send(
+      "**ギシンアンキ（二人用人狼）を開始します！**\n" +
+      "まもなく各プレイヤーにDMで役職が配布されます。"
+    );
+
+    this.prepareGishinAnkiRoles(game);
+
+    for (const pid of game.participants) {
+      game.originalRoles.set(pid, game.players.get(pid)!.role);
+    }
+
+    log(guild.id, `GishinAnki game started with players: ${game.participants.join(", ")}`);
+
+    await this.sendGishinAnkiRoleMessages(guild, game);
+    await this.startGishinAnkiInformationPhase(guild, game);
+    return "ゲームを開始しました！";
+  }
+
+  private prepareGishinAnkiRoles(game: GameState): void {
+    const pool: RoleType[] = [
+      RoleType.SURVIVOR, RoleType.SURVIVOR, RoleType.SURVIVOR,
+      RoleType.MISANTHROPIST, RoleType.MISANTHROPIST,
+      RoleType.WEREWOLF_GISHIN, RoleType.WEREWOLF_GISHIN,
+    ];
+
+    const shuffled = [...pool].sort(() => Math.random() - 0.5);
+    for (let i = 0; i < game.participants.length; i++) {
+      const role = shuffled[i];
+      game.players.set(game.participants[i], {
+        userId: game.participants[i], role, team: getTeam(role), isAlive: true, isProtected: false,
+      });
+    }
+    game.gishinDeck = shuffled.slice(game.participants.length);
+    game.gishinHands = new Map();
+    game.gishinActionTokens = new Map();
+    game.gishinDecisions = new Map();
+    game.gishinReady = [];
+    game.gishinRequestPending = null;
+    game.gishinExchanges = false;
+
+    for (const pid of game.participants) {
+      game.gishinHands.set(pid, []);
+      game.gishinActionTokens.set(pid, 2);
+    }
+
+    log(game.guildId, `GishinAnki roles prepared. Players: ${game.participants.map((p) => `${p}=${getRoleName(game.players.get(p)!.role)}`).join(", ")}, Deck: ${game.gishinDeck.map((r) => getRoleName(r)).join(", ")}`);
+  }
+
+  private async sendGishinAnkiRoleMessages(guild: Guild, game: GameState): Promise<void> {
+    const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
+
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId("gishin_reveal_role")
+        .setLabel("自分の役職を確認する")
+        .setStyle(ButtonStyle.Secondary),
+    );
+
+    await gameChannel.send({
+      content: "**役職を確認するには、下のボタンをクリックしてください。**",
+      components: [row],
+    });
+
+    const collector = gameChannel.createMessageComponentCollector({
+      filter: (i) => i.customId === "gishin_reveal_role" && game.participants.includes(i.user.id),
+      time: 30000,
+    });
+
+    collector.on("collect", async (i) => {
+      const ps = game.players.get(i.user.id);
+      if (!ps) {
+        await i.reply({ content: "役職情報が見つかりません。", flags: EPHEMERAL });
+        return;
+      }
+      const def = GISHINANKI_ROLE_DEFINITIONS[ps.role];
+      let msg = `あなたの役職は **${def?.name ?? getRoleName(ps.role)}** です！\n${def?.description ?? ""}`;
+      msg += "\n\n**アクションコマ**: 2つ\n山札からカードを引いたり、相手の手札を要求できます。";
+
+      await i.reply({ content: msg, flags: EPHEMERAL });
+    });
+  }
+
+  private async startGishinAnkiInformationPhase(guild: Guild, game: GameState): Promise<void> {
+    const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
+
+    await this.sendGishinAnkiStatus(gameChannel, game);
+
+    const infoRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId("gishin_draw").setLabel("山札を見る").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("gishin_request").setLabel("相手のカードを要求").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("gishin_ready").setLabel("決断に進む（準備完了）").setStyle(ButtonStyle.Success),
+    );
+
+    await gameChannel.send({
+      content: "**情報収集フェーズ**\nアクションコマを消費して情報を集めましょう。両方が準備完了になると決断フェーズに進みます。",
+      components: [infoRow],
+    });
+
+    const collector = gameChannel.createMessageComponentCollector({
+      time: 150000,
+      filter: (i) => game.participants.includes(i.user.id),
+    });
+
+    let resolvePhase: (() => void) | null = null;
+
+    const checkReady = () => {
+      if (!resolvePhase) return;
+      if (game.gishinReady.length >= 2) {
+        collector.stop();
+        resolvePhase();
+        resolvePhase = null;
+      }
+    };
+
+    collector.on("collect", async (i) => {
+      if (i.customId === "gishin_draw") {
+        await this.handleGishinDraw(guild, game, i, gameChannel);
+      } else if (i.customId === "gishin_request") {
+        await this.handleGishinRequest(guild, game, i, gameChannel);
+      } else if (i.customId === "gishin_ready") {
+        if (!game.gishinReady.includes(i.user.id)) {
+          game.gishinReady.push(i.user.id);
+          await i.reply({ content: "準備完了しました。相手を待っています。", flags: EPHEMERAL });
+          await this.sendGishinAnkiStatus(gameChannel, game);
+          checkReady();
+        } else {
+          await i.reply({ content: "すでに準備完了しています。", flags: EPHEMERAL });
+        }
+      }
+    });
+
+    await new Promise<void>((resolve) => {
+      resolvePhase = resolve;
+      setTimeout(() => {
+        collector.stop();
+        if (resolvePhase) {
+          resolvePhase();
+          resolvePhase = null;
+          gameChannel.send("**時間切れです。決断フェーズに移行します。**").catch(() => {});
+        }
+      }, 150000);
+    });
+
+    await this.startGishinAnkiDecisionPhase(guild, game);
+  }
+
+  private async sendGishinAnkiStatus(channel: TextChannel, game: GameState): Promise<void> {
+    const p1 = game.participants[0];
+    const p2 = game.participants[1];
+    if (!p1 || !p2) return;
+
+    const g1 = channel.guild.members.cache.get(p1)?.displayName ?? p1;
+    const g2 = channel.guild.members.cache.get(p2)?.displayName ?? p2;
+
+    const t1 = game.gishinActionTokens.get(p1) ?? 0;
+    const t2 = game.gishinActionTokens.get(p2) ?? 0;
+    const h1 = game.gishinHands.get(p1)?.length ?? 0;
+    const h2 = game.gishinHands.get(p2)?.length ?? 0;
+    const r1 = game.gishinReady.includes(p1) ? "✅" : "⏳";
+    const r2 = game.gishinReady.includes(p2) ? "✅" : "⏳";
+    const deck = game.gishinDeck.length;
+
+    const embed = new EmbedBuilder()
+      .setTitle("📊 情報収集フェーズ ステータス")
+      .setColor(0x00aaff)
+      .addFields(
+        { name: `${g1} ${r1}`, value: `コマ: ${"●".repeat(t1)}${"○".repeat(2 - t1)}\n手札: ${h1}枚`, inline: true },
+        { name: `${g2} ${r2}`, value: `コマ: ${"●".repeat(t2)}${"○".repeat(2 - t2)}\n手札: ${h2}枚`, inline: true },
+        { name: "山札", value: `${deck}枚残り`, inline: true },
+      );
+
+    await channel.send({ embeds: [embed] }).catch(() => {});
+  }
+
+  private async handleGishinDraw(guild: Guild, game: GameState, i: any, channel: TextChannel): Promise<void> {
+    const pid = i.user.id;
+    const tokens = game.gishinActionTokens.get(pid) ?? 0;
+    if (tokens <= 0) {
+      await i.reply({ content: "アクションコマが残っていません。", flags: EPHEMERAL });
+      return;
+    }
+    if (game.gishinDeck.length === 0) {
+      await i.reply({ content: "山札にカードが残っていません。", flags: EPHEMERAL });
+      return;
+    }
+
+    const drawn = game.gishinDeck.pop()!;
+    game.gishinHands.get(pid)!.push(drawn);
+    game.gishinActionTokens.set(pid, tokens - 1);
+
+    try {
+      const member = await guild.members.fetch(pid);
+      await member.send(`**山札から引きました:** ${getRoleName(drawn)}`);
+    } catch {}
+
+    await i.reply({ content: `山札から1枚引き、手札に加えました。（残りコマ: ${tokens - 1}）`, flags: EPHEMERAL });
+    await this.sendGishinAnkiStatus(channel, game);
+  }
+
+  private async handleGishinRequest(guild: Guild, game: GameState, i: any, channel: TextChannel): Promise<void> {
+    const pid = i.user.id;
+    const opponent = game.participants.find((p) => p !== pid)!;
+    const tokens = game.gishinActionTokens.get(pid) ?? 0;
+
+    const myRole = game.players.get(pid)!.role;
+    if (myRole === RoleType.MISANTHROPIST) {
+      await i.reply({ content: "**人間不信**のため、相手にカードを要求できません。", flags: EPHEMERAL });
+      return;
+    }
+
+    if (tokens <= 0) {
+      await i.reply({ content: "アクションコマが残っていません。", flags: EPHEMERAL });
+      return;
+    }
+
+    const myHand = game.gishinHands.get(pid) ?? [];
+    if (myHand.length >= 2) {
+      await i.reply({ content: "手札が2枚のため、要求できません。", flags: EPHEMERAL });
+      return;
+    }
+
+    const oppHand = game.gishinHands.get(opponent) ?? [];
+    const oppRole = game.players.get(opponent)!.role;
+
+    let accept = true;
+    let reason = "";
+
+    if (oppRole === RoleType.MISANTHROPIST) {
+      accept = false;
+      reason = "相手が人間不信のため、自動的に拒否されました。";
+    } else if (oppHand.length === 0) {
+      accept = false;
+      reason = "相手に手札がありません。";
+    } else {
+      try {
+        const oppMember = await guild.members.fetch(opponent);
+        const reqMember = await guild.members.fetch(pid);
+
+        const handOptions = oppHand.map((r, idx) =>
+          new StringSelectMenuOptionBuilder().setLabel(getRoleName(r)).setValue(String(idx))
+        );
+        const select = new StringSelectMenuBuilder()
+          .setCustomId("gishin_show_card")
+          .setPlaceholder("見せるカードを選んでください")
+          .addOptions(handOptions);
+
+        const msg = await oppMember.send({
+          content: `**${reqMember.displayName}** があなたの手札を見せてもらうよう要求しています。\n見せるカードを選ぶか、拒否してください。`,
+          components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)],
+        }).catch(() => null);
+
+        if (!msg) {
+          accept = false;
+          reason = "相手にDMを送信できませんでした。";
+        } else {
+          const filter2 = (resp: any) => resp.user.id === opponent && resp.customId === "gishin_show_card";
+          const selectResp = await msg.awaitMessageComponent({ filter: filter2, time: 30000 }).catch(() => null);
+
+          if (!selectResp) {
+            accept = false;
+            reason = "相手が応答しませんでした。";
+            await msg.edit({ content: "時間切れです。", components: [] }).catch(() => {});
+          } else if (!selectResp.isStringSelectMenu()) {
+            accept = false;
+            reason = "エラーが発生しました。";
+          } else {
+            const cardIdx = parseInt(selectResp.values[0]);
+            const shownRole = oppHand[cardIdx];
+            accept = true;
+
+            await selectResp.update({
+              content: `**${getRoleName(shownRole)}** を見せました。`,
+              components: [],
+            });
+
+            try {
+              await reqMember.send(`相手が **${getRoleName(shownRole)}** を見せてくれました。`);
+            } catch {}
+          }
+        }
+      } catch {
+        accept = false;
+        reason = "エラーが発生しました。";
+      }
+    }
+
+    if (accept) {
+      game.gishinActionTokens.set(pid, tokens - 1);
+      await i.reply({ content: `相手がカードを見せてくれました。（残りコマ: ${tokens - 1}）`, flags: EPHEMERAL });
+    } else {
+      const replyMsg = reason || "相手に拒否されました。（コマは消費されません）";
+      await i.reply({ content: replyMsg, flags: EPHEMERAL });
+    }
+
+    await this.sendGishinAnkiStatus(channel, game);
+  }
+
+  private async startGishinAnkiDecisionPhase(guild: Guild, game: GameState): Promise<void> {
+    game.phase = GamePhase.GISHIN_DECISION;
+    const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
+
+    await gameChannel.send("**決断フェーズ**\n両プレイヤーにDMで決断が送られます。同時に選択してください。");
+
+    for (const pid of game.participants) {
+      await this.sendGishinAnkiDecisionDM(guild, game, pid);
+    }
+
+    await new Promise<void>((resolve) => {
+      const checkInterval = setInterval(() => {
+        if (game.gishinDecisions.size >= 2) {
+          clearInterval(checkInterval);
+          resolve();
+        }
+      }, 500);
+
+      setTimeout(() => {
+        clearInterval(checkInterval);
+
+        for (const pid of game.participants) {
+          if (!game.gishinDecisions.has(pid)) {
+            const role = game.players.get(pid)!.role;
+            if (role === RoleType.WEREWOLF_GISHIN) {
+              game.gishinDecisions.set(pid, "見逃す");
+            } else {
+              game.gishinDecisions.set(pid, "留まる");
+            }
+            gameChannel.send(`<@${pid}> の決断が時間切れのため自動設定されました。`).catch(() => {});
+          }
+        }
+        resolve();
+      }, 60000);
+    });
+
+    await this.finishGishinAnkiGame(guild, game);
+  }
+
+  private async sendGishinAnkiDecisionDM(guild: Guild, game: GameState, pid: string): Promise<void> {
+    const role = game.players.get(pid)!.role;
+    let options: string[];
+
+    if (role === RoleType.WEREWOLF_GISHIN) {
+      options = ["喰らう", "見逃す"];
+    } else if (role === RoleType.GHOST) {
+      options = ["留まる"];
+    } else {
+      options = ["留まる", "立ち去る"];
+    }
+
+    try {
+      const member = await guild.members.fetch(pid);
+      const select = new StringSelectMenuBuilder()
+        .setCustomId("gishin_decision")
+        .setPlaceholder("決断を選んでください")
+        .addOptions(
+          options.map((o) => new StringSelectMenuOptionBuilder().setLabel(o).setValue(o))
+        );
+
+      const msg = await member.send({
+        content: `**決断フェーズ**\nあなたの役職: ${getRoleName(role)}\n決断を選んでください。`,
+        components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)],
+      }).catch(() => null);
+
+      if (!msg) return;
+
+      const filter = (i: any) => i.user.id === pid && i.customId === "gishin_decision";
+      const ci = await msg.awaitMessageComponent({ filter, time: 60000 }).catch(() => null);
+
+      if (ci && ci.isStringSelectMenu()) {
+        game.gishinDecisions.set(pid, ci.values[0]);
+        await ci.update({
+          content: `決断「**${ci.values[0]}**」を選択しました。相手の決断を待っています。`,
+          components: [],
+        });
+      }
+    } catch {}
+  }
+
+  private async finishGishinAnkiGame(guild: Guild, game: GameState): Promise<void> {
+    game.phase = GamePhase.FINISHED;
+    const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
+
+    const p1 = game.participants[0];
+    const p2 = game.participants[1];
+
+    const role1 = game.players.get(p1)!.role;
+    const role2 = game.players.get(p2)!.role;
+    const dec1 = game.gishinDecisions.get(p1)!;
+    const dec2 = game.gishinDecisions.get(p2)!;
+
+    const result = this.calculateGishinAnkiWinner(role1, dec1, role2, dec2);
+
+    let msg = "**=== ギシンアンキ 結果 ===**\n\n";
+    msg += `**<@${p1}>**: ${getRoleName(role1)} → 「${dec1}」\n`;
+    msg += `**<@${p2}>**: ${getRoleName(role2)} → 「${dec2}」\n\n`;
+
+    if (result.winner1 === "win" && result.winner2 === "win") {
+      msg += "**両者勝利！** 🎉\n";
+    } else if (result.winner1 === "win") {
+      msg += `**<@${p1}> の勝利！** 🎉\n`;
+    } else if (result.winner2 === "win") {
+      msg += `**<@${p2}> の勝利！** 🎉\n`;
+    } else {
+      msg += "**両者敗北…** 💀\n";
+    }
+
+    if (result.reason) {
+      msg += `\n*${result.reason}*`;
+    }
+
+    msg += "\n\n**山札（残り）:** ";
+    if (game.gishinDeck.length > 0) {
+      msg += game.gishinDeck.map((r) => getRoleName(r)).join(", ");
+    } else {
+      msg += "なし";
+    }
+
+    msg += "\n**捨て札・交換履歴はありません。**";
+    msg += "\n\n`/end` でゲームを初期化してください。";
+
+    await gameChannel.send(msg);
+    log(guild.id, `GishinAnki finished. ${p1}=${getRoleName(role1)}(${dec1}), ${p2}=${getRoleName(role2)}(${dec2}) → ${result.winner1}/${result.winner2}`);
+  }
+
+  private calculateGishinAnkiWinner(
+    role1: RoleType, dec1: string,
+    role2: RoleType, dec2: string,
+  ): { winner1: "win" | "lose"; winner2: "win" | "lose"; reason: string } {
+    const isHuman1 = role1 !== RoleType.WEREWOLF_GISHIN && role1 !== RoleType.GHOST;
+    const isHuman2 = role2 !== RoleType.WEREWOLF_GISHIN && role2 !== RoleType.GHOST;
+    const isWolf1 = role1 === RoleType.WEREWOLF_GISHIN;
+    const isWolf2 = role2 === RoleType.WEREWOLF_GISHIN;
+    const isGhost1 = role1 === RoleType.GHOST;
+    const isGhost2 = role2 === RoleType.GHOST;
+
+    // Ghost special
+    if (isGhost1) {
+      if (isHuman2 && dec2 === "立ち去る") return { winner1: "win", winner2: "lose", reason: "幽霊の勝利条件: 相手が人間で「立ち去る」を選んだ。" };
+      if (isWolf2 && dec2 === "喰らう") return { winner1: "win", winner2: "lose", reason: "幽霊の勝利条件: 相手が人狼で「喰らう」を選んだ。" };
+      return { winner1: "lose", winner2: "win", reason: "幽霊は敗北した。" };
+    }
+    if (isGhost2) {
+      if (isHuman1 && dec1 === "立ち去る") return { winner1: "lose", winner2: "win", reason: "幽霊の勝利条件: 相手が人間で「立ち去る」を選んだ。" };
+      if (isWolf1 && dec1 === "喰らう") return { winner1: "lose", winner2: "win", reason: "幽霊の勝利条件: 相手が人狼で「喰らう」を選んだ。" };
+      return { winner1: "win", winner2: "lose", reason: "幽霊は敗北した。" };
+    }
+
+    // Both human
+    if (isHuman1 && isHuman2) {
+      if (dec1 === "留まる" && dec2 === "留まる") return { winner1: "win", winner2: "win", reason: "両者「留まる」→ 両者勝利！" };
+      if (dec1 === "立ち去る" || dec2 === "立ち去る") return { winner1: "lose", winner2: "lose", reason: "どちらかが「立ち去る」→ 両者敗北。" };
+    }
+
+    // Both wolf
+    if (isWolf1 && isWolf2) {
+      if (dec1 === "見逃す" && dec2 === "見逃す") return { winner1: "win", winner2: "win", reason: "両者「見逃す」→ 両者勝利！" };
+      return { winner1: "lose", winner2: "lose", reason: "どちらかが「喰らう」→ 両者敗北（共食い）。" };
+    }
+
+    // One human, one wolf
+    const humanDec = isHuman1 ? dec1 : dec2;
+    const wolfDec = isWolf1 ? dec1 : dec2;
+    const humanRole = isHuman1 ? role1 : role2;
+    const wolfRole = isWolf1 ? role1 : role2;
+
+    if (humanDec === "立ち去る") return { winner1: isHuman1 ? "win" : "lose", winner2: isHuman2 ? "win" : "lose", reason: "人間が「立ち去る」→ 人間の勝利。" };
+    if (wolfDec === "見逃す") return { winner1: isHuman1 ? "win" : "lose", winner2: isHuman2 ? "win" : "lose", reason: "人狼が「見逃す」→ 人間の勝利。" };
+    if (humanDec === "留まる" && wolfDec === "喰らう") return { winner1: isWolf1 ? "win" : "lose", winner2: isWolf2 ? "win" : "lose", reason: "人間「留まる」＋ 人狼「喰らう」→ 人狼の勝利。" };
+
+    return { winner1: "lose", winner2: "lose", reason: "勝敗判定不能。" };
+  }
+
+  // ===== End Gishin Anki =====
+
   private async createGameChannels(guild: Guild, game: GameState): Promise<void> {
     const category = await guild.channels.create({ name: "人狼ゲーム", type: ChannelType.GuildCategory });
     const everyone = guild.roles.everyone;
@@ -1566,7 +2069,8 @@ export class GameManager {
     if (!player) return null;
 
     const isOneNight = game.settings.gameMode === GameMode.ONENIGHT;
-    const def = ROLE_DEFINITIONS[player.role];
+    const isGishin = game.settings.gameMode === GameMode.GISHINANKI;
+    const def = isGishin ? (GISHINANKI_ROLE_DEFINITIONS[player.role] ?? ROLE_DEFINITIONS[player.role]) : ROLE_DEFINITIONS[player.role];
     const werewolfIds = game.participants.filter((p) => game.players.get(p)?.role === RoleType.WEREWOLF);
     const fanaticIds = game.participants.filter((p) => game.players.get(p)?.role === RoleType.FANATIC);
 
@@ -1853,7 +2357,12 @@ export class GameManager {
     if (!game) return "設定がまだ行われていません。";
     if (game.hostUserId !== userId) return "ホストのみが設定を確認できます。";
     const dist = game.settings.roleDistribution;
-    const modeName = game.settings.gameMode === GameMode.CLASSIC ? "通常人狼" : "ワンナイト人狼";
+    const modeNames: Record<string, string> = {
+      [GameMode.CLASSIC]: "通常人狼",
+      [GameMode.ONENIGHT]: "ワンナイト人狼",
+      [GameMode.GISHINANKI]: "ギシンアンキ",
+    };
+    const modeName = modeNames[game.settings.gameMode] ?? game.settings.gameMode;
     let msg = `**現在の設定**\nモード: ${modeName}\n参加者: ${game.participants.length}人\n`;
     for (const [role, count] of Object.entries(dist)) {
       if ((count as number) > 0) msg += `${getRoleName(role as RoleType)}: ${count}人\n`;
@@ -1930,10 +2439,55 @@ export class GameManager {
       );
     }
 
+    if (args === "gishinanki_roles") {
+      let msg = "**=== ギシンアンキ（二人用人狼） 役職一覧 ===**\n\n";
+      for (const [, def] of Object.entries(GISHINANKI_ROLE_DEFINITIONS)) {
+        if (!def) continue;
+        msg += `**${def.name}** (${def.team === Team.VILLAGER ? "人間陣営" : def.team === Team.WEREWOLF ? "人狼陣営" : "第三陣営"})\n${def.description}\n勝利条件: ${def.winCondition}\n\n`;
+      }
+      return msg;
+    }
+
+    if (args === "gishinanki_rules") {
+      return (
+        "**=== ギシンアンキ（二人用人狼） ルール説明 ===**\n\n" +
+        "ギシンアンキは2人専用の短期決戦型人狼ゲームです。原作は「疑心暗鬼の小屋」。\n\n" +
+        "**ゲームの流れ:**\n" +
+        "1. 設定 → 2. 役職配布(7枚のカードから各1枚ずつ) → " +
+        "3. 情報収集フェーズ(アクションコマ消費) → " +
+        "4. 決断フェーズ(「留まる/立ち去る」or「喰らう/見逃す」) → " +
+        "5. 結果発表・勝敗判定\n\n" +
+        "**カード構成（7枚）:**\n" +
+        "生存者×3 / 人間不信×2 / 人狼×2\n\n" +
+        "**情報収集フェーズのアクション:**\n" +
+        "各プレイヤー2つのアクションコマを持ってスタート。1コマ消費で以下を実行:\n" +
+        "1. **山札を見る**: 山札から1枚引き、手札として持つ（自分だけ確認可能）\n" +
+        "2. **相手のカードを要求**: 相手の手札を1枚見せてもらうよう要求（相手が拒否可、拒否されたらコマ消費なし）\n\n" +
+        "**制限:**\n" +
+        "• 手札が2枚の場合は要求不可\n" +
+        "• 人間不信は要求不可＆要求されたら必ず拒否\n" +
+        "• 会話は自由（嘘/本当どちらを言ってもOK）\n\n" +
+        "**決断:**\n" +
+        "• 生存者/人間不信/愚者: 「留まる」or「立ち去る」\n" +
+        "• 人狼: 「喰らう」or「見逃す」\n" +
+        "• 幽霊: 「留まる」のみ\n\n" +
+        "**勝利条件マトリックス:**\n" +
+        "人間vs人間: 両方留まる→両者勝利、片方立ち去る→両者敗北\n" +
+        "人間vs人狼: 立ち去るor見逃す→人間勝利、留まる＋喰らう→人狼勝利\n" +
+        "人狼vs人狼: 両方見逃す→両者勝利、どちらか喰らう→両者敗北\n" +
+        "幽霊: 相手が人間で立ち去るor人狼で喰らう→幽霊勝利\n\n" +
+        "**役職詳細は `/help 項目: ギシンアンキ 役職一覧`**"
+      );
+    }
+
     let modeInfo = "";
     if (currentMode) {
-      const modeName = currentMode === GameMode.CLASSIC ? "通常人狼" : "ワンナイト人狼";
-      modeInfo = `現在の設定モード: **${modeName}**\n\n`;
+      const modeNames: Record<string, string> = {
+        [GameMode.CLASSIC]: "通常人狼",
+        [GameMode.ONENIGHT]: "ワンナイト人狼",
+        [GameMode.GISHINANKI]: "ギシンアンキ",
+      };
+      modeInfo = `現在の設定モード: **${modeNames[currentMode] ?? currentMode}**\n\n`;
     }
 
     return (
@@ -1949,7 +2503,9 @@ export class GameManager {
       "`/help 項目: 通常人狼 ルール説明` - 通常人狼のルール\n" +
       "`/help 項目: 通常人狼 役職一覧` - 通常人狼の役職\n" +
       "`/help 項目: ワンナイト人狼 ルール説明` - ワンナイト人狼のルール\n" +
-      "`/help 項目: ワンナイト人狼 役職一覧` - ワンナイト人狼の役職"
+      "`/help 項目: ワンナイト人狼 役職一覧` - ワンナイト人狼の役職\n" +
+      "`/help 項目: ギシンアンキ ルール説明` - ギシンアンキのルール\n" +
+      "`/help 項目: ギシンアンキ 役職一覧` - ギシンアンキの役職"
     );
   }
 
@@ -1965,6 +2521,9 @@ export class GameManager {
     if (game.settings.gameMode === GameMode.ONENIGHT) {
       await this.startOneNightVoting(guild, game);
       return "会議をスキップし、投票に移ります。";
+    }
+    if (game.settings.gameMode === GameMode.GISHINANKI) {
+      return "ギシンアンキモードではスキップ機能は使用できません。";
     }
     if (game.dayCount === 1) {
       await this.startNight(guild, game);
@@ -2000,7 +2559,7 @@ export class GameManager {
     log(guildId, "Cleaning up game channels and state");
     const guild = this.client.guilds.cache.get(guildId);
 
-    if (game.settings.gameMode === GameMode.ONENIGHT) {
+    if (game.settings.gameMode === GameMode.ONENIGHT || game.settings.gameMode === GameMode.GISHINANKI) {
       if (guild && game.gameTextChannelId) {
         const ch = guild.channels.cache.get(game.gameTextChannelId);
         if (ch) { try { await ch.delete(); } catch {} }

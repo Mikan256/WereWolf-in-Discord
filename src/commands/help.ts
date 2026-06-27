@@ -14,6 +14,8 @@ export const data = new SlashCommandBuilder()
         { name: "通常人狼 ルール説明", value: "classic_rules" },
         { name: "ワンナイト人狼 役職一覧", value: "oneten_roles" },
         { name: "ワンナイト人狼 ルール説明", value: "oneten_rules" },
+        { name: "ギシンアンキ 役職一覧", value: "gishinanki_roles" },
+        { name: "ギシンアンキ ルール説明", value: "gishinanki_rules" },
       )
   );
 

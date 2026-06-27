@@ -1,6 +1,7 @@
 export enum GameMode {
   CLASSIC = "classic",
   ONENIGHT = "oneten",
+  GISHINANKI = "gishinanki",
 }
 
 export enum GamePhase {
@@ -9,6 +10,8 @@ export enum GamePhase {
   DAY_VOTING = "day_voting",
   NIGHT = "night",
   FINISHED = "finished",
+  GISHIN_INFORMATION = "gishin_information",
+  GISHIN_DECISION = "gishin_decision",
 }
 
 export enum RoleType {
@@ -31,6 +34,12 @@ export enum RoleType {
   INSOMNIAC = "insomniac",
   HUNTER_ONENIGHT = "hunter_one_night",
   TANNER = "tanner",
+  // Gishin Anki roles
+  SURVIVOR = "survivor",
+  MISANTHROPIST = "misanthropist",
+  WEREWOLF_GISHIN = "werewolf_gishin",
+  GHOST = "ghost",
+  FOOL = "fool",
 }
 
 export enum Team {
@@ -90,6 +99,14 @@ export interface GameState {
   centerRoles: RoleType[];
   nightActionStep: number;
   originalRoles: Map<string, RoleType>;
+  // Gishin Anki specific
+  gishinDeck: RoleType[];
+  gishinHands: Map<string, RoleType[]>;
+  gishinActionTokens: Map<string, number>;
+  gishinDecisions: Map<string, string>;
+  gishinReady: string[];
+  gishinRequestPending: { from: string; to: string } | null;
+  gishinExchanges: boolean;
 }
 
 export const ONENIGHT_ROLE_DEFINITIONS: Partial<Record<RoleType, RoleInfo>> = {
@@ -155,6 +172,44 @@ export const ONENIGHT_ROLE_DEFINITIONS: Partial<Record<RoleType, RoleInfo>> = {
     team: Team.THIRD,
     description: "自分が追放されると単独勝利します。いかに自分が追放されるかが鍵です。",
     winCondition: "会議の投票で自分が追放されること。",
+  },
+};
+
+export const GISHINANKI_ROLE_DEFINITIONS: Partial<Record<RoleType, RoleInfo>> = {
+  [RoleType.SURVIVOR]: {
+    type: RoleType.SURVIVOR,
+    name: "生存者",
+    team: Team.VILLAGER,
+    description: "自由に行動・交渉可能な基本の人間役職です。情報収集フェーズで山札からカードを引いたり、相手の手札を要求できます。「留まる」または「立ち去る」の決断が可能です。",
+    winCondition: "相手の決断との組み合わせにより変動（勝利表参照）。",
+  },
+  [RoleType.MISANTHROPIST]: {
+    type: RoleType.MISANTHROPIST,
+    name: "人間不信",
+    team: Team.VILLAGER,
+    description: "他プレイヤーにカードの要求ができず、相手から要求された場合は必ず拒否しなければなりません。決断は「留まる」または「立ち去る」を選べます。",
+    winCondition: "相手の決断との組み合わせにより変動（勝利表参照）。",
+  },
+  [RoleType.WEREWOLF_GISHIN]: {
+    type: RoleType.WEREWOLF_GISHIN,
+    name: "人狼",
+    team: Team.WEREWOLF,
+    description: "人間に擬態して情報を引き出しましょう。特殊な制限はなく、生存者と同じように行動できます。決断は「喰らう」または「見逃す」を選べます。",
+    winCondition: "相手の決断との組み合わせにより変動（勝利表参照）。",
+  },
+  [RoleType.GHOST]: {
+    type: RoleType.GHOST,
+    name: "幽霊",
+    team: Team.THIRD,
+    description: "決断で「留まる」しか選べません。相手の決断によって勝利条件が変わる特殊な役職です。",
+    winCondition: "相手が人間で「立ち去る」を選ぶ、または相手が人狼で「喰らう」を選ぶと幽霊の勝利。それ以外は敗北。",
+  },
+  [RoleType.FOOL]: {
+    type: RoleType.FOOL,
+    name: "愚者",
+    team: Team.VILLAGER,
+    description: "特定の条件（両者のアクションコマ消費＆カードの受け渡しなし）を満たすと、場のカードと自分の役職を交換できます。決断は「留まる」または「立ち去る」を選べます。",
+    winCondition: "相手の決断との組み合わせにより変動（勝利表参照）。",
   },
 };
 
@@ -296,5 +351,41 @@ export const ROLE_DEFINITIONS: Record<RoleType, RoleInfo> = {
     team: Team.THIRD,
     description: "自分が追放されると単独勝利します。",
     winCondition: "会議の投票で自分が追放されること。",
+  },
+  // Gishin Anki roles
+  [RoleType.SURVIVOR]: {
+    type: RoleType.SURVIVOR,
+    name: "生存者",
+    team: Team.VILLAGER,
+    description: "自由に行動・交渉可能な基本の人間役職です。",
+    winCondition: "相手の決断との組み合わせにより変動。",
+  },
+  [RoleType.MISANTHROPIST]: {
+    type: RoleType.MISANTHROPIST,
+    name: "人間不信",
+    team: Team.VILLAGER,
+    description: "カードの要求が不可。相手から要求されたら必ず拒否。",
+    winCondition: "相手の決断との組み合わせにより変動。",
+  },
+  [RoleType.WEREWOLF_GISHIN]: {
+    type: RoleType.WEREWOLF_GISHIN,
+    name: "人狼",
+    team: Team.WEREWOLF,
+    description: "人間に擬態。特殊な制限はなく、生存者と同じように行動できる。",
+    winCondition: "相手の決断との組み合わせにより変動。",
+  },
+  [RoleType.GHOST]: {
+    type: RoleType.GHOST,
+    name: "幽霊",
+    team: Team.THIRD,
+    description: "決断で「留まる」しか選べない。",
+    winCondition: "相手が人間で「立ち去る」または相手が人狼で「喰らう」で幽霊勝利。",
+  },
+  [RoleType.FOOL]: {
+    type: RoleType.FOOL,
+    name: "愚者",
+    team: Team.VILLAGER,
+    description: "条件を満たすと場のカードと役職を交換できる。",
+    winCondition: "相手の決断との組み合わせにより変動。",
   },
 };

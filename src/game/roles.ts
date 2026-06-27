@@ -3,10 +3,11 @@ import { RoleType, Team } from "./types";
 const WEREWOLF_TEAM_ROLES = new Set([
   RoleType.WEREWOLF, RoleType.ACCOMPLICE,
   RoleType.MADMAN, RoleType.FANATIC, RoleType.BLACK_CAT,
+  RoleType.WEREWOLF_GISHIN,
 ]);
 
 export function isTrueWerewolf(role: RoleType): boolean {
-  return role === RoleType.WEREWOLF;
+  return role === RoleType.WEREWOLF || role === RoleType.WEREWOLF_GISHIN;
 }
 
 export function isCountedAsVillager(role: RoleType): boolean {
@@ -15,7 +16,7 @@ export function isCountedAsVillager(role: RoleType): boolean {
 
 export function getTeam(role: RoleType): Team {
   if (WEREWOLF_TEAM_ROLES.has(role)) return Team.WEREWOLF;
-  if (role === RoleType.FOX || role === RoleType.TERU_TERU) return Team.THIRD;
+  if (role === RoleType.FOX || role === RoleType.TERU_TERU || role === RoleType.GHOST) return Team.THIRD;
   return Team.VILLAGER;
 }
 
@@ -39,6 +40,11 @@ export function getRoleName(role: RoleType): string {
     [RoleType.INSOMNIAC]: "失眠症",
     [RoleType.HUNTER_ONENIGHT]: "狩人",
     [RoleType.TANNER]: "皮なめし職人",
+    [RoleType.SURVIVOR]: "生存者",
+    [RoleType.MISANTHROPIST]: "人間不信",
+    [RoleType.WEREWOLF_GISHIN]: "人狼",
+    [RoleType.GHOST]: "幽霊",
+    [RoleType.FOOL]: "愚者",
   };
   return names[role];
 }
@@ -81,6 +87,16 @@ export function getRoleDescription(role: RoleType): string {
       "あなたは狩人です。投票で追放された場合、自分に投票したプレイヤーの中からランダムに1人道連れにします。",
     [RoleType.TANNER]:
       "あなたは皮なめし職人です。自分が追放されると単独勝利します。追放されることを目指しましょう。",
+    [RoleType.SURVIVOR]:
+      "あなたは生存者です。自由に行動・交渉できます。山札からカードを引いたり、相手に手札を見せてもらうことができます。決断は「留まる」または「立ち去る」から選びます。",
+    [RoleType.MISANTHROPIST]:
+      "あなたは人間不信です。他プレイヤーにカードの要求ができません。相手から要求された場合は必ず拒否しなければなりません。決断は「留まる」または「立ち去る」から選びます。",
+    [RoleType.WEREWOLF_GISHIN]:
+      "あなたは人狼です。人間に擬態して情報を引き出しましょう。生存者と同じように行動できます。決断は「喰らう」または「見逃す」から選びます。",
+    [RoleType.GHOST]:
+      "あなたは幽霊です。決断で「留まる」しか選べません。相手が人間で「立ち去る」か、相手が人狼で「喰らう」を選べばあなたの勝利です。",
+    [RoleType.FOOL]:
+      "あなたは愚者です。条件を満たせば場のカードと自分の役職を交換できます。決断は「留まる」または「立ち去る」から選びます。",
   };
   return descriptions[role];
 }
