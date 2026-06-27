@@ -91,10 +91,8 @@ export class GameManager {
 
   async setSetting(
     guildId: string, hostUserId: string, participants: string[],
-    werewolfCount: number, accompliceCount: number, madmanCount: number,
-    fanaticCount: number, foxCount: number, fortuneTellerCount: number,
-    mediumCount: number, knightCount: number, teruTeruCount: number,
-    nekomataCount: number, blackCatCount: number, meetingTimeMinutes: number,
+    roleDistribution: Partial<Record<RoleType, number>>,
+    meetingTimeMinutes: number,
     anonymousVoting?: boolean, gameMode?: GameMode,
   ): Promise<string> {
     let game = this.games.get(guildId);
@@ -104,23 +102,20 @@ export class GameManager {
 
     const isGishinAnki = gameMode === GameMode.GISHINANKI;
     if (!isGishinAnki) {
-      const total = werewolfCount + accompliceCount + madmanCount + fanaticCount +
-        foxCount + fortuneTellerCount + mediumCount + knightCount +
-        teruTeruCount + nekomataCount + blackCatCount;
-      if (total > participants.length) return "参加者数より役職数の合計が多いです。";
+      const total = Object.values(roleDistribution).reduce((a, b) => a + b, 0);
+      if (gameMode === GameMode.CLASSIC && total > participants.length) {
+        return "参加者数より役職数の合計が多いです。";
+      }
+      if (gameMode === GameMode.ONENIGHT && total > participants.length + 3) {
+        return "役職数の合計が多すぎます（最大: 参加者数 + 3）。";
+      }
+    }
+    if (isGishinAnki && participants.length !== 2) {
+      return "ギシンアンキは2人専用です。";
     }
 
     game.participants = participants;
-    game.settings.roleDistribution = {};
-    const entries: [number, RoleType][] = [
-      [werewolfCount, RoleType.WEREWOLF], [accompliceCount, RoleType.ACCOMPLICE],
-      [madmanCount, RoleType.MADMAN], [fanaticCount, RoleType.FANATIC],
-      [foxCount, RoleType.FOX], [fortuneTellerCount, RoleType.FORTUNE_TELLER],
-      [mediumCount, RoleType.MEDIUM], [knightCount, RoleType.KNIGHT],
-      [teruTeruCount, RoleType.TERU_TERU], [nekomataCount, RoleType.NEKOMATA],
-      [blackCatCount, RoleType.BLACK_CAT],
-    ];
-    for (const [c, r] of entries) { if (c > 0) game.settings.roleDistribution[r] = c; }
+    game.settings.roleDistribution = { ...roleDistribution };
     game.settings.meetingTimeMinutes = meetingTimeMinutes;
     if (anonymousVoting !== undefined) game.settings.anonymousVoting = anonymousVoting;
     if (gameMode !== undefined) game.settings.gameMode = gameMode;
@@ -2364,10 +2359,17 @@ export class GameManager {
     };
     const modeName = modeNames[game.settings.gameMode] ?? game.settings.gameMode;
     let msg = `**現在の設定**\nモード: ${modeName}\n参加者: ${game.participants.length}人\n`;
-    for (const [role, count] of Object.entries(dist)) {
-      if ((count as number) > 0) msg += `${getRoleName(role as RoleType)}: ${count}人\n`;
+    if (game.settings.gameMode === GameMode.GISHINANKI) {
+      msg += "役職: 自動配布（生存者×3/人間不信×2/人狼×2）\n";
+    } else {
+      for (const [role, count] of Object.entries(dist)) {
+        if ((count as number) > 0) msg += `${getRoleName(role as RoleType)}: ${count}人\n`;
+      }
     }
-    msg += `会議時間: ${game.settings.meetingTimeMinutes}分\nフェーズ: ${game.phase}`;
+    if (game.settings.gameMode !== GameMode.GISHINANKI) {
+      msg += `会議時間: ${game.settings.meetingTimeMinutes}分\n`;
+    }
+    msg += `フェーズ: ${game.phase}`;
     return msg;
   }
 

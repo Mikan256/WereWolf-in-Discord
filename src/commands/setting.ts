@@ -30,6 +30,24 @@ const ROLE_OPTIONS: { key: string; role: RoleType; default: number }[] = [
   { key: "黒猫", role: RoleType.BLACK_CAT, default: 0 },
 ];
 
+const ONENIGHT_ROLE_OPTIONS: { key: string; role: RoleType; default: number }[] = [
+  { key: "市民", role: RoleType.VILLAGER, default: 0 },
+  { key: "人狼", role: RoleType.WEREWOLF, default: 1 },
+  { key: "占い師", role: RoleType.FORTUNE_TELLER, default: 1 },
+  { key: "怪盗", role: RoleType.ROBBER, default: 0 },
+  { key: "トラブルメーカー", role: RoleType.TROUBLEMAKER, default: 0 },
+  { key: "酔っ払い", role: RoleType.DRUNK, default: 0 },
+  { key: "失眠症", role: RoleType.INSOMNIAC, default: 0 },
+  { key: "狩人", role: RoleType.HUNTER_ONENIGHT, default: 0 },
+  { key: "皮なめし職人", role: RoleType.TANNER, default: 0 },
+];
+
+function getRoleOptions(mode: GameMode): { key: string; role: RoleType; default: number }[] {
+  if (mode === GameMode.ONENIGHT) return ONENIGHT_ROLE_OPTIONS;
+  if (mode === GameMode.GISHINANKI) return [];
+  return ROLE_OPTIONS;
+}
+
 type Page = "main" | "select_participants" | "select_role" | "adjust_role" | "select_time";
 
 interface InteractiveState {
@@ -115,16 +133,34 @@ async function executeWithArgs(
   };
 
   const anonymousVoting = interaction.options.getBoolean("匿名投票") ?? true;
+  const meetingTime = optOrDefault("会議時間", 3);
+
+  let roleDistribution: Partial<Record<RoleType, number>> = {};
+  if (gameMode === GameMode.CLASSIC) {
+    roleDistribution = {
+      [RoleType.WEREWOLF]: optOrDefault("人狼", 1),
+      [RoleType.ACCOMPLICE]: opt("共犯者"),
+      [RoleType.MADMAN]: opt("狂人"),
+      [RoleType.FANATIC]: opt("狂信者"),
+      [RoleType.FOX]: opt("妖狐"),
+      [RoleType.FORTUNE_TELLER]: optOrDefault("占い師", 1),
+      [RoleType.MEDIUM]: opt("霊媒師"),
+      [RoleType.KNIGHT]: opt("騎士"),
+      [RoleType.TERU_TERU]: opt("てるてる坊主"),
+      [RoleType.NEKOMATA]: opt("猫又"),
+      [RoleType.BLACK_CAT]: opt("黒猫"),
+    };
+    for (const [k, v] of Object.entries(roleDistribution)) {
+      if (v === 0) delete roleDistribution[k as unknown as keyof typeof roleDistribution];
+    }
+  }
 
   await gameManager.setSetting(
     interaction.guildId!,
     interaction.user.id,
     participantIds,
-    optOrDefault("人狼", 1),
-    opt("共犯者"), opt("狂人"), opt("狂信者"),
-    opt("妖狐"), optOrDefault("占い師", 1), opt("霊媒師"), opt("騎士"),
-    opt("てるてる坊主"), opt("猫又"), opt("黒猫"),
-    optOrDefault("会議時間", 3),
+    roleDistribution,
+    meetingTime,
     anonymousVoting,
     gameMode,
   );
@@ -134,27 +170,31 @@ async function executeWithArgs(
   let detail = "";
   if (gameMode === GameMode.GISHINANKI) {
     detail = `参加者: ${participantIds.length}人\n（ギシンアンキは2人固定、役職は自動配布されます）`;
-  } else {
+  } else if (gameMode === GameMode.CLASSIC) {
     detail =
       `人狼: ${optOrDefault("人狼", 1)} / 共犯者: ${opt("共犯者")} / 狂人: ${opt("狂人")} / 狂信者: ${opt("狂信者")}\n` +
       `妖狐: ${opt("妖狐")} / 占い師: ${optOrDefault("占い師", 1)} / 霊媒師: ${opt("霊媒師")} / 騎士: ${opt("騎士")}\n` +
       `てるてる坊主: ${opt("てるてる坊主")} / 猫又: ${opt("猫又")} / 黒猫: ${opt("黒猫")}\n`;
+  } else {
+    detail = `参加者: ${participantIds.length}人\n`;
   }
 
   const s =
     `**設定完了**\nモード: ${modeName}\n${detail}` +
-    `会議時間: ${optOrDefault("会議時間", 3)}分\n` +
-    `投票公開: ${anonymousVoting ? "匿名" : "公開"}`;
+    (gameMode !== GameMode.GISHINANKI ? `会議時間: ${meetingTime}分\n` : "") +
+    (gameMode !== GameMode.GISHINANKI ? `投票公開: ${anonymousVoting ? "匿名" : "公開"}` : "");
 
   await interaction.editReply(s);
 }
 
 async function executeInteractive(interaction: ChatInputCommandInteraction, gameManager: GameManager) {
   const loaded = gameManager.loadSettings(interaction.guildId!);
-  const defaultRoleCounts = Object.fromEntries(ROLE_OPTIONS.map((r) => [r.key, r.default]));
+  const mode = loaded?.settings.gameMode ?? GameMode.CLASSIC;
+  const options = getRoleOptions(mode);
+  const defaultRoleCounts = Object.fromEntries(options.map((r) => [r.key, r.default]));
   if (loaded) {
     for (const [role, count] of Object.entries(loaded.settings.roleDistribution)) {
-      const key = ROLE_OPTIONS.find((r) => r.role === role)?.key;
+      const key = options.find((r) => r.role === role)?.key;
       if (key) defaultRoleCounts[key] = count as number;
     }
   }
@@ -166,7 +206,7 @@ async function executeInteractive(interaction: ChatInputCommandInteraction, game
     page: "main",
     selectedRoleKey: null,
     anonymousVoting: loaded?.settings.anonymousVoting ?? true,
-    gameMode: loaded?.settings.gameMode ?? GameMode.CLASSIC,
+    gameMode: mode,
   };
 
   const userId = interaction.user.id;
@@ -214,14 +254,20 @@ function buildEmbed(state: InteractiveState): EmbedBuilder {
     .addFields(
       { name: "ゲームモード", value: getModeName(state.gameMode), inline: true },
       { name: "参加者", value: state.participants.length > 0 ? `${state.participants.length}人` : "未設定", inline: true },
+    );
+
+  if (!isGishin) {
+    embed.addFields(
       { name: "会議時間", value: `${state.meetingMinutes}分`, inline: true },
       { name: "投票表示", value: state.anonymousVoting ? "匿名" : "公開", inline: true },
     );
+  }
 
   if (isGishin) {
     embed.addFields({ name: "役職", value: "自動配布（生存者×3/人間不信×2/人狼×2）", inline: false });
   } else {
-    embed.addFields({ name: "役職内訳", value: ROLE_OPTIONS.map((r) => `${r.key}: ${state.roleCounts[r.key]}人`).join("\n"), inline: false });
+    const options = getRoleOptions(state.gameMode);
+    embed.addFields({ name: "役職内訳", value: options.map((r) => `${r.key}: ${state.roleCounts[r.key]}人`).join("\n"), inline: false });
   }
 
   return embed;
@@ -229,18 +275,28 @@ function buildEmbed(state: InteractiveState): EmbedBuilder {
 
 async function render(interaction: ChatInputCommandInteraction, state: InteractiveState) {
   if (state.page === "main") {
+    const isGishin = state.gameMode === GameMode.GISHINANKI;
     const modeLabel = `モード: ${getModeName(state.gameMode)}`;
     const row1 = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId("set_participants").setLabel("参加者を設定").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId("set_roles").setLabel("役職を設定").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId("set_time").setLabel("会議時間").setStyle(ButtonStyle.Primary),
     );
-    const toggleLabel = state.anonymousVoting ? "投票公開: 匿名" : "投票公開: 公開";
+    if (!isGishin) {
+      row1.addComponents(
+        new ButtonBuilder().setCustomId("set_roles").setLabel("役職を設定").setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId("set_time").setLabel("会議時間").setStyle(ButtonStyle.Primary),
+      );
+    }
     const modeStyle = state.gameMode === GameMode.GISHINANKI ? ButtonStyle.Danger : state.gameMode === GameMode.ONENIGHT ? ButtonStyle.Success : ButtonStyle.Secondary;
     const row2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId("toggle_mode").setLabel(modeLabel).setStyle(modeStyle),
-      new ButtonBuilder().setCustomId("toggle_anonymous").setLabel(toggleLabel).setStyle(ButtonStyle.Secondary),
     );
+    if (!isGishin) {
+      row2.addComponents(
+        new ButtonBuilder().setCustomId("toggle_anonymous")
+          .setLabel(state.anonymousVoting ? "投票公開: 匿名" : "投票公開: 公開")
+          .setStyle(ButtonStyle.Secondary),
+      );
+    }
     const row3 = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId("save").setLabel("保存").setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId("cancel").setLabel("キャンセル").setStyle(ButtonStyle.Danger),
@@ -265,11 +321,12 @@ async function render(interaction: ChatInputCommandInteraction, state: Interacti
     );
     await interaction.editReply({ content: `参加者を選んでください（最低${minPlayers}人）`, embeds: [], components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select), back] });
   } else if (state.page === "select_role") {
+    const options = getRoleOptions(state.gameMode);
     const select = new StringSelectMenuBuilder()
       .setCustomId("pick")
       .setPlaceholder("設定する役職を選ぶ")
       .addOptions(
-        ROLE_OPTIONS.map((r) =>
+        options.map((r) =>
           new StringSelectMenuOptionBuilder().setLabel(`${r.key} (現在: ${state.roleCounts[r.key]})`).setValue(r.key)
         )
       );
@@ -335,15 +392,21 @@ async function handleMainAction(
       await ci.reply({ content: `参加者が${minPlayers}人未満です。`, flags: EPHEMERAL });
       return true;
     }
+    if (state.gameMode === GameMode.GISHINANKI && state.participants.length !== 2) {
+      await ci.reply({ content: "ギシンアンキは2人専用です。", flags: EPHEMERAL });
+      return true;
+    }
     await ci.deferUpdate();
     try {
-      const get = (k: string) => state.roleCounts[k] ?? 0;
+      const options = getRoleOptions(state.gameMode);
+      const roleDistribution: Partial<Record<RoleType, number>> = {};
+      for (const opt of options) {
+        const count = state.roleCounts[opt.key] ?? 0;
+        if (count > 0) roleDistribution[opt.role] = count;
+      }
       const result = await gameManager.setSetting(
         interaction.guildId!, userId, state.participants,
-        get("人狼"), get("共犯者"), get("狂人"), get("狂信者"),
-        get("妖狐"), get("占い師"), get("霊媒師"), get("騎士"),
-        get("てるてる坊主"), get("猫又"), get("黒猫"),
-        state.meetingMinutes, state.anonymousVoting, state.gameMode,
+        roleDistribution, state.meetingMinutes, state.anonymousVoting, state.gameMode,
       );
       const modeName = getModeName(state.gameMode);
       await ci.editReply({ content: `**設定完了**\nモード: ${modeName}\n${result}`, embeds: [], components: [] });
@@ -363,7 +426,10 @@ async function handleMainAction(
   if (ci.customId === "toggle_mode") {
     const modes = [GameMode.CLASSIC, GameMode.ONENIGHT, GameMode.GISHINANKI];
     const idx = modes.indexOf(state.gameMode);
-    state.gameMode = modes[(idx + 1) % modes.length];
+    const newMode = modes[(idx + 1) % modes.length];
+    state.gameMode = newMode;
+    const newOptions = getRoleOptions(newMode);
+    state.roleCounts = Object.fromEntries(newOptions.map((r) => [r.key, r.default]));
     await ci.deferUpdate();
     return true;
   }
@@ -410,7 +476,8 @@ async function handleRoleAdjust(ci: MessageComponentInteraction, state: Interact
   }
 
   if (ci.customId === "inc") {
-    const max = ROLE_OPTIONS.find((r) => r.key === key)?.role === RoleType.WEREWOLF ? 5 : 3;
+    const options = getRoleOptions(state.gameMode);
+    const max = options.find((r) => r.key === key)?.role === RoleType.WEREWOLF ? 5 : 3;
     if (current >= max) {
       await ci.reply({ content: `最大${max}人までです。`, flags: EPHEMERAL });
       return;
