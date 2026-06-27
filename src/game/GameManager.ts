@@ -426,6 +426,7 @@ export class GameManager {
       try {
         const member = await guild.members.fetch(sid);
         const otherPlayers = game.participants.filter((p) => p !== sid);
+        const names = await this.resolveDisplayNames(guild, otherPlayers);
         const select = new StringSelectMenuBuilder()
           .setCustomId("oneten_seer_target")
           .setPlaceholder("占う対象を選んでください")
@@ -433,7 +434,7 @@ export class GameManager {
             new StringSelectMenuOptionBuilder().setLabel("センターカード2枚を見る").setValue("center"),
             ...otherPlayers.map((p) =>
               new StringSelectMenuOptionBuilder()
-                .setLabel(guild.members.cache.get(p)?.displayName ?? p)
+                .setLabel(names.get(p)!)
                 .setValue(p)
             )
           );
@@ -470,13 +471,14 @@ export class GameManager {
       try {
         const member = await guild.members.fetch(rid);
         const otherPlayers = game.participants.filter((p) => p !== rid);
+        const names = await this.resolveDisplayNames(guild, otherPlayers);
         const select = new StringSelectMenuBuilder()
           .setCustomId("oneten_robber_target")
           .setPlaceholder("交換する相手を選んでください")
           .addOptions(
             otherPlayers.map((p) =>
               new StringSelectMenuOptionBuilder()
-                .setLabel(guild.members.cache.get(p)?.displayName ?? p)
+                .setLabel(names.get(p)!)
                 .setValue(p)
             )
           );
@@ -514,6 +516,7 @@ export class GameManager {
         const otherPlayers = game.participants.filter((p) => p !== tid);
         if (otherPlayers.length < 2) { await processTM(idx + 1); return; }
 
+        const names = await this.resolveDisplayNames(guild, otherPlayers);
         const select = new StringSelectMenuBuilder()
           .setCustomId("oneten_tm_target1")
           .setPlaceholder("1人目を選んでください")
@@ -521,7 +524,7 @@ export class GameManager {
           .addOptions(
             otherPlayers.map((p) =>
               new StringSelectMenuOptionBuilder()
-                .setLabel(guild.members.cache.get(p)?.displayName ?? p)
+                .setLabel(names.get(p)!)
                 .setValue(p)
             )
           );
@@ -540,6 +543,7 @@ export class GameManager {
           if (!ci.isStringSelectMenu()) { await processTM(idx + 1); return; }
           target1 = ci.values[0];
           const remaining = otherPlayers.filter((p) => p !== target1);
+          const remainingNames = await this.resolveDisplayNames(guild, remaining);
           const select2 = new StringSelectMenuBuilder()
             .setCustomId("oneten_tm_target2")
             .setPlaceholder("2人目を選んでください")
@@ -547,7 +551,7 @@ export class GameManager {
             .addOptions(
               remaining.map((p) =>
                 new StringSelectMenuOptionBuilder()
-                  .setLabel(guild.members.cache.get(p)?.displayName ?? p)
+                  .setLabel(remainingNames.get(p)!)
                   .setValue(p)
               )
             );
@@ -568,7 +572,8 @@ export class GameManager {
           game.players.get(target1)!.team = getTeam(role2);
           game.players.get(target2)!.role = role1;
           game.players.get(target2)!.team = getTeam(role1);
-          await ci2.update({ content: `**${guild.members.cache.get(target1)?.displayName}** と **${guild.members.cache.get(target2)?.displayName}** の役職を交換しました。`, components: [] });
+          const finalNames = await this.resolveDisplayNames(guild, [target1, target2]);
+          await ci2.update({ content: `**${finalNames.get(target1)!}** と **${finalNames.get(target2)!}** の役職を交換しました。`, components: [] });
         } catch {
           await msg.edit({ content: "時間切れです。", components: [] }).catch(() => {});
         }
@@ -647,6 +652,7 @@ export class GameManager {
 
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     const alivePlayers = game.participants.filter((p) => game.players.get(p)?.isAlive);
+    const names = await this.resolveDisplayNames(guild, alivePlayers);
 
     const embed = new EmbedBuilder()
       .setTitle("投票時間")
@@ -684,7 +690,7 @@ export class GameManager {
             new StringSelectMenuOptionBuilder().setLabel("棄権").setValue("abstain"),
             ...alivePlayers.map((p) =>
               new StringSelectMenuOptionBuilder()
-                .setLabel(guild.members.cache.get(p)?.displayName ?? p)
+                .setLabel(names.get(p)!)
                 .setValue(p)
             )
           );
@@ -768,6 +774,7 @@ export class GameManager {
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     const alivePlayers = game.participants.filter((p) => game.players.get(p)?.isAlive);
     game.votes.clear();
+    const candidateNames = await this.resolveDisplayNames(guild, candidates);
 
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId("oneten_runoff_open").setLabel("決選投票する").setStyle(ButtonStyle.Danger),
@@ -786,7 +793,7 @@ export class GameManager {
         .addOptions(
           new StringSelectMenuOptionBuilder().setLabel("棄権").setValue("abstain"),
           ...candidates.map((c) =>
-            new StringSelectMenuOptionBuilder().setLabel(guild.members.cache.get(c)?.displayName ?? c).setValue(c)
+            new StringSelectMenuOptionBuilder().setLabel(candidateNames.get(c)!).setValue(c)
           )
         );
       await i.reply({
@@ -1096,8 +1103,9 @@ export class GameManager {
     const p2 = game.participants[1];
     if (!p1 || !p2) return;
 
-    const g1 = channel.guild.members.cache.get(p1)?.displayName ?? p1;
-    const g2 = channel.guild.members.cache.get(p2)?.displayName ?? p2;
+    const names = await this.resolveDisplayNames(channel.guild, [p1, p2]);
+    const g1 = names.get(p1)!;
+    const g2 = names.get(p2)!;
 
     const t1 = game.gishinActionTokens.get(p1) ?? 0;
     const t2 = game.gishinActionTokens.get(p2) ?? 0;
@@ -1581,6 +1589,8 @@ export class GameManager {
       }
     };
 
+    const voteNames = await this.resolveDisplayNames(guild, alivePlayers);
+
     collector.on("collect", async (i) => {
       if (i.customId === "vote_open") {
         const current = game.votes.get(i.user.id);
@@ -1591,7 +1601,7 @@ export class GameManager {
             new StringSelectMenuOptionBuilder().setLabel("棄権").setValue("abstain"),
             ...alivePlayers.map((p) =>
               new StringSelectMenuOptionBuilder()
-                .setLabel(guild.members.cache.get(p)?.displayName ?? p)
+                .setLabel(voteNames.get(p)!)
                 .setValue(p)
             )
           );
@@ -1795,6 +1805,8 @@ export class GameManager {
       time: 30000,
     });
 
+    const runoffCandidateNames = await this.resolveDisplayNames(guild, candidates);
+
     collector.on("collect", async (i) => {
       const current = game.votes.get(i.user.id);
       const select = new StringSelectMenuBuilder()
@@ -1803,7 +1815,7 @@ export class GameManager {
         .addOptions(
           new StringSelectMenuOptionBuilder().setLabel("棄権").setValue("abstain"),
           ...candidates.map((c) =>
-            new StringSelectMenuOptionBuilder().setLabel(guild.members.cache.get(c)?.displayName ?? c).setValue(c)
+            new StringSelectMenuOptionBuilder().setLabel(runoffCandidateNames.get(c)!).setValue(c)
           )
         );
       const msg = current === undefined
@@ -1975,13 +1987,14 @@ export class GameManager {
       }
 
       const { role, targets } = info;
+      const targetNames = await this.resolveDisplayNames(guild, targets);
 
       const select = new StringSelectMenuBuilder()
         .setCustomId("night_action_select")
         .setPlaceholder("対象を選んでください")
         .addOptions(targets.map((t) =>
           new StringSelectMenuOptionBuilder()
-            .setLabel(guild.members.cache.get(t)?.displayName ?? t)
+            .setLabel(targetNames.get(t)!)
             .setValue(t)
         ));
 
@@ -2656,5 +2669,19 @@ export class GameManager {
         } catch {}
       }
     }
+  }
+
+  private async resolveDisplayNames(guild: Guild, userIds: string[]): Promise<Map<string, string>> {
+    const entries = await Promise.all(
+      userIds.map(async (id) => {
+        try {
+          const member = await guild.members.fetch(id);
+          return [id, member.displayName] as const;
+        } catch {
+          return [id, id] as const;
+        }
+      })
+    );
+    return new Map(entries);
   }
 }
