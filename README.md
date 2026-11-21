@@ -183,3 +183,54 @@ Discordボットを使用してDiscord鯖上で自由に人狼をできるよう
 - **時間設定**: 夜フェーズは約60秒（全員のアクション完了またはタイムアウトまで）。昼の会議時間は通常3〜5分推奨。
 - **観戦者**: ゲーム時間が短いため、観戦者機能は実装しない。
 - **ゲームモードの選択**: `/setting` の最初の選択肢で「通常人狼」か「ワンナイト人狼」を選べるようにする。選択肢に応じて設定可能な役職とゲームフローが変化する。
+
+---
+
+# 開発
+
+開発者向けの詳細は [AGENTS.md](./AGENTS.md) を参照してください。
+
+## 必要環境
+
+- Node.js 20 以上
+
+## セットアップ
+
+```bash
+npm ci
+cp .env.example .env
+# .env に DISCORD_TOKEN などを設定
+npm run deploy-commands
+npm run dev
+```
+
+## 主なコマンド
+
+```bash
+npm run typecheck   # 型チェック
+npm run build       # dist/ へビルド
+npm test            # テスト
+npm run dev         # ts-node で起動
+npm start           # ビルド済みの Bot を起動
+```
+
+## テスト
+
+`test/*.test.ts` にテストを配置しています。Node.js 標準のテストランナーを使用するため、追加のテストフレームワークは不要です。
+
+```bash
+npm test
+```
+
+`npm test` はテスト用に `src/` と `test/` を `dist-test/` へコンパイルしてから実行します。`dist-test/` は生成物なのでコミットしないでください。
+
+## CI
+
+GitHub Actions (`.github/workflows/ci.yml`) で以下を検証します。
+
+- Node.js 20 / 22 での型チェック・ビルド・テスト
+- Docker イメージのビルド
+
+## 環境変数
+
+`.env.example` を参照してください。`KOYEB_S3_*` を設定しない場合、設定はメモリ上にのみ保存されます。
