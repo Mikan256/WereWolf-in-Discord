@@ -85,3 +85,8 @@ async function main() {
 }
 
 main().catch(console.error);
+
+// タイマーや非同期処理内の予期せぬエラーでプロセスごと落ちないようにする
+process.on("unhandledRejection", (reason) => {
+  console.error("[Bot] Unhandled rejection:", reason);
+});

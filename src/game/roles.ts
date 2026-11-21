@@ -11,7 +11,17 @@ export function isTrueWerewolf(role: RoleType): boolean {
 }
 
 export function isCountedAsVillager(role: RoleType): boolean {
-  return role !== RoleType.WEREWOLF && WEREWOLF_TEAM_ROLES.has(role);
+  return !isTrueWerewolf(role) && WEREWOLF_TEAM_ROLES.has(role);
+}
+
+/** Fisher-Yates 法による偏りのないシャッフル */
+export function shuffle<T>(items: T[]): T[] {
+  const result = [...items];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
 }
 
 export function getTeam(role: RoleType): Team {
@@ -119,7 +129,7 @@ export function distributeRoles(
     pool.push(RoleType.VILLAGER);
   }
 
-  const shuffled = [...playerIds].sort(() => Math.random() - 0.5);
+  const shuffled = shuffle(playerIds);
   for (let i = 0; i < shuffled.length; i++) {
     result.set(shuffled[i], pool[i]);
   }
@@ -128,9 +138,10 @@ export function distributeRoles(
 }
 
 export function getFortuneResult(role: RoleType): string {
-  if (role === RoleType.WEREWOLF) return "人狼陣営";
-  if (role === RoleType.ACCOMPLICE) return "市民陣營"; // disguised
-  if (role === RoleType.FOX) return "第三陣営";
+  // 共犯者は占い・霊媒では市民陣営として表示される（仕様）
+  if (role === RoleType.ACCOMPLICE) return "市民陣営";
+  if (getTeam(role) === Team.WEREWOLF) return "人狼陣営";
+  if (getTeam(role) === Team.THIRD) return "第三陣営";
   return "市民陣営";
 }
 

@@ -20,14 +20,16 @@ export class PersistenceManager {
     this.bucket = process.env.KOYEB_S3_BUCKET || "";
     this.key = process.env.KOYEB_S3_KEY || "settings.json";
     if (this.bucket) {
+      const accessKeyId = process.env.KOYEB_S3_ACCESS_KEY;
+      const secretAccessKey = process.env.KOYEB_S3_SECRET_KEY;
       this.s3 = new S3Client({
         region: process.env.KOYEB_S3_REGION || "us-east-1",
         endpoint: process.env.KOYEB_S3_ENDPOINT,
-        credentials: {
-          accessKeyId: process.env.KOYEB_S3_ACCESS_KEY || "",
-          secretAccessKey: process.env.KOYEB_S3_SECRET_KEY || "",
-        },
         forcePathStyle: true,
+        // 明示的なキーが無い場合は SDK の既定の認証情報チェーン（IAM ロール等）を使う
+        ...(accessKeyId && secretAccessKey
+          ? { credentials: { accessKeyId, secretAccessKey } }
+          : {}),
       });
     }
   }

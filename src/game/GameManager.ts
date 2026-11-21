@@ -10,7 +10,6 @@ import {
   ButtonStyle,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
-  ComponentType,
   EmbedBuilder,
 } from "discord.js";
 import {
@@ -32,8 +31,9 @@ import {
   getTeam,
   isTrueWerewolf,
   isCountedAsVillager,
+  shuffle,
 } from "./roles";
-import { PersistenceManager, PersistedSettings } from "../utils/persistence";
+import { PersistenceManager } from "../utils/persistence";
 
 const EPHEMERAL = 64;
 
@@ -89,6 +89,15 @@ export class GameManager {
     this.games.delete(guildId);
   }
 
+  /** メモリ上にゲームが無ければ、永続化された設定から復元する */
+  private ensureGame(guildId: string): GameState | undefined {
+    const existing = this.games.get(guildId);
+    if (existing) return existing;
+    const persisted = this.persistence.getSettings(guildId);
+    if (!persisted) return undefined;
+    return this.createGame(guildId, persisted.hostUserId);
+  }
+
   async setSetting(
     guildId: string, hostUserId: string, participants: string[],
     roleDistribution: Partial<Record<RoleType, number>>,
@@ -113,6 +122,9 @@ export class GameManager {
     if (isGishinAnki && participants.length !== 2) {
       return "ギシンアンキは2人専用です。";
     }
+    if (!isGishinAnki && (roleDistribution[RoleType.WEREWOLF] ?? 0) < 1) {
+      return "人狼を1人以上設定してください。";
+    }
 
     game.participants = participants;
     game.settings.roleDistribution = { ...roleDistribution };
@@ -133,31 +145,55 @@ export class GameManager {
       });
     } catch (e) {
       log(guildId, `Persistence save failed: ${e}`);
-      return "設定の保存に失敗しました。ファイルの権限を確認してください。";
+      return "設定の保存に失敗しました。保存先のストレージ設定を確認してください。";
     }
 
     return "設定が完了しました。`/start` でゲームを開始できます。";
   }
 
   async startGame(guildId: string, userId: string): Promise<string> {
-    const game = this.games.get(guildId);
+    const game = this.ensureGame(guildId);
     if (!game) return "設定が行われていません。先に `/setting` を行ってください。";
     if (game.hostUserId !== userId) return "ホストのみがゲームを開始できます。";
     if (game.phase !== GamePhase.WAITING) return "すでにゲームが開始されています。";
     const minPlayers = game.settings.gameMode === GameMode.ONENIGHT ? 3 : game.settings.gameMode === GameMode.GISHINANKI ? 2 : 4;
     if (game.participants.length < minPlayers) return `最低${minPlayers}人以上の参加者が必要です。`;
     if (game.settings.gameMode === GameMode.GISHINANKI && game.participants.length > 2) return "ギシンアンキは2人専用です。";
+    if (game.settings.gameMode !== GameMode.GISHINANKI && (game.settings.roleDistribution[RoleType.WEREWOLF] ?? 0) < 1) {
+      return "人狼が設定されていません。`/setting` で人狼を1人以上設定してください。";
+    }
     log(guildId, `Host <${userId}> starting game with ${game.participants.length} players (mode: ${game.settings.gameMode})`);
 
     const guild = this.client.guilds.cache.get(guildId);
     if (!guild) return "ギルドが見つかりません。";
 
+    // 参加者がサーバーから退出しているとチャンネル作成などが失敗するため、事前に確認する
+    const missingMembers: string[] = [];
+    for (const pid of game.participants) {
+      try {
+        await guild.members.fetch(pid);
+      } catch {
+        missingMembers.push(pid);
+      }
+    }
+    if (missingMembers.length > 0) {
+      return `次のユーザーがサーバーにいないため開始できません: ${missingMembers.map((id) => `<@${id}>`).join(", ")}`;
+    }
+
     if (game.settings.gameMode === GameMode.ONENIGHT) {
-      return this.startOneNightGame(guild, game);
+      try {
+        return await this.startOneNightGame(guild, game);
+      } catch (error) {
+        return this.abortStart(guild, game, error);
+      }
     }
 
     if (game.settings.gameMode === GameMode.GISHINANKI) {
-      return this.startGishinAnkiGame(guild, game);
+      try {
+        return await this.startGishinAnkiGame(guild, game);
+      } catch (error) {
+        return this.abortStart(guild, game, error);
+      }
     }
 
     try {
@@ -222,8 +258,23 @@ export class GameManager {
       return "ゲームを開始しました！";
     } catch (error) {
       console.error(error);
+      await this.cleanupGame(guildId).catch(() => {});
       return "ゲーム開始中にエラーが発生しました。";
     }
+  }
+
+  /** 開始途中で失敗したゲームを待機状態に戻す */
+  private async abortStart(guild: Guild, game: GameState, error: unknown): Promise<string> {
+    console.error(`[Game ${guild.id.slice(0, 8)}] Failed to start game:`, error);
+    if (game.gameTextChannelId) {
+      const ch = guild.channels.cache.get(game.gameTextChannelId);
+      if (ch) {
+        try { await ch.delete(); } catch {}
+      }
+      game.gameTextChannelId = null;
+    }
+    game.phase = GamePhase.WAITING;
+    return "ゲーム開始中にエラーが発生しました。";
   }
 
   // ===== One Night Werewolf =====
@@ -255,7 +306,10 @@ export class GameManager {
     log(guild.id, `OneNight game started with ${game.participants.length} players, center: ${game.centerRoles.map((r) => getRoleName(r)).join(", ")}`);
 
     await this.sendOneNightRoleMessages(guild, game);
-    await this.runOneNightNightSequence(guild, game);
+    // 夜の進行は完了まで数分かかるため、/start の応答を待たせない
+    void this.runOneNightNightSequence(guild, game).catch((error) => {
+      console.error(`[Game ${guild.id.slice(0, 8)}] OneNight night sequence failed:`, error);
+    });
     return "ゲームを開始しました！";
   }
 
@@ -271,7 +325,7 @@ export class GameManager {
       pool.push(RoleType.VILLAGER);
     }
 
-    const shuffled = [...pool].sort(() => Math.random() - 0.5);
+    const shuffled = shuffle(pool);
     for (let i = 0; i < game.participants.length; i++) {
       const role = shuffled[i];
       game.players.set(game.participants[i], {
@@ -307,11 +361,15 @@ export class GameManager {
         await i.reply({ content: "役職情報が見つかりません。", flags: EPHEMERAL });
         return;
       }
-      const def = ROLE_DEFINITIONS[ps.role];
-      let msg = `あなたの役職は **${def.name}** です！\n${this.getOneNightRoleDesc(ps.role)}\n勝利条件: ${def.winCondition}`;
+      // 夜のアクション中にカードが入れ替わるため、配布時の役職を表示する
+      const originalRole = game.originalRoles.get(i.user.id) ?? ps.role;
+      const def = ONENIGHT_ROLE_DEFINITIONS[originalRole] ?? ROLE_DEFINITIONS[originalRole];
+      let msg = `あなたの役職は **${def.name}** です！\n${this.getOneNightRoleDesc(originalRole)}\n勝利条件: ${def.winCondition}`;
 
-      if (ps.role === RoleType.WEREWOLF) {
-        const wolfIds = game.participants.filter((p) => game.players.get(p)?.role === RoleType.WEREWOLF && p !== i.user.id);
+      if (originalRole === RoleType.WEREWOLF) {
+        const wolfIds = game.participants.filter(
+          (p) => (game.originalRoles.get(p) ?? game.players.get(p)?.role) === RoleType.WEREWOLF && p !== i.user.id
+        );
         if (wolfIds.length > 0) {
           msg += `\n\n**他の人狼**: ${wolfIds.map((id) => `<@${id}>`).join(", ")}`;
         } else {
@@ -358,6 +416,7 @@ export class GameManager {
   }
 
   private async processOneNightStep(guild: Guild, game: GameState, order: RoleType[], index: number): Promise<void> {
+    if (this.games.get(game.guildId) !== game) return;
     if (index >= order.length) {
       await this.finalizeOneNightNight(guild, game);
       return;
@@ -635,6 +694,7 @@ export class GameManager {
   }
 
   private async finalizeOneNightNight(guild: Guild, game: GameState): Promise<void> {
+    if (this.games.get(game.guildId) !== game) return;
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     await gameChannel.send("**夜が明けました！** 会議を始めてください。");
     game.phase = GamePhase.DAY_DISCUSSION;
@@ -646,6 +706,7 @@ export class GameManager {
   }
 
   private async startOneNightVoting(guild: Guild, game: GameState): Promise<void> {
+    if (this.games.get(game.guildId) !== game) return;
     if (game.phase !== GamePhase.DAY_DISCUSSION) return;
     game.phase = GamePhase.DAY_VOTING;
     game.votes.clear();
@@ -728,6 +789,7 @@ export class GameManager {
   }
 
   private async processOneNightResults(guild: Guild, game: GameState): Promise<void> {
+    if (this.games.get(game.guildId) !== game) return;
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     const alivePlayers = game.participants.filter((p) => game.players.get(p)?.isAlive);
 
@@ -771,6 +833,7 @@ export class GameManager {
   }
 
   private async runOneNightRunoff(guild: Guild, game: GameState, candidates: string[]): Promise<void> {
+    if (this.games.get(game.guildId) !== game) return;
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     const alivePlayers = game.participants.filter((p) => game.players.get(p)?.isAlive);
     game.votes.clear();
@@ -876,7 +939,7 @@ export class GameManager {
 
   private async handleOneNightHunterDeath(guild: Guild, game: GameState, hunterId: string): Promise<void> {
     const voters = [...game.votes.entries()]
-      .filter(([, target]) => target === hunterId)
+      .filter(([voter, target]) => target === hunterId && voter !== hunterId)
       .map(([voter]) => voter);
     if (voters.length === 0) {
       await (guild.channels.cache.get(game.gameTextChannelId!) as TextChannel)
@@ -890,6 +953,7 @@ export class GameManager {
   }
 
   private async finishOneNightGame(guild: Guild, game: GameState, eliminatedId: string | null): Promise<void> {
+    if (this.games.get(game.guildId) !== game) return;
     game.phase = GamePhase.FINISHED;
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
 
@@ -900,7 +964,7 @@ export class GameManager {
     let result = "**=== ワンナイト人狼 結果 ===**\n\n";
 
     if (eliminatedId) {
-      result += `**追放されたプレイヤー**: <@${eliminatedId}>（最終役職: ${getRoleName(eliminatedRole!)})）\n\n`;
+      result += `**追放されたプレイヤー**: <@${eliminatedId}>（最終役職: ${getRoleName(eliminatedRole!)}）\n\n`;
     } else {
       result += "**追放されたプレイヤー**: なし\n\n";
     }
@@ -966,7 +1030,10 @@ export class GameManager {
     log(guild.id, `GishinAnki game started with players: ${game.participants.join(", ")}`);
 
     await this.sendGishinAnkiRoleMessages(guild, game);
-    await this.startGishinAnkiInformationPhase(guild, game);
+    // 情報収集・決断フェーズは数分かかるため、/start の応答を待たせない
+    void this.startGishinAnkiInformationPhase(guild, game).catch((error) => {
+      console.error(`[Game ${guild.id.slice(0, 8)}] GishinAnki phase failed:`, error);
+    });
     return "ゲームを開始しました！";
   }
 
@@ -977,7 +1044,7 @@ export class GameManager {
       RoleType.WEREWOLF_GISHIN, RoleType.WEREWOLF_GISHIN,
     ];
 
-    const shuffled = [...pool].sort(() => Math.random() - 0.5);
+    const shuffled = shuffle(pool);
     for (let i = 0; i < game.participants.length; i++) {
       const role = shuffled[i];
       game.players.set(game.participants[i], {
@@ -1027,14 +1094,16 @@ export class GameManager {
         return;
       }
       const def = GISHINANKI_ROLE_DEFINITIONS[ps.role];
+      const remainingTokens = game.gishinActionTokens.get(i.user.id) ?? 2;
       let msg = `あなたの役職は **${def?.name ?? getRoleName(ps.role)}** です！\n${def?.description ?? ""}`;
-      msg += "\n\n**アクションコマ**: 2つ\n山札からカードを引いたり、相手の手札を要求できます。";
+      msg += `\n\n**アクションコマ**: ${remainingTokens}つ\n山札からカードを引いたり、相手の手札を要求できます。`;
 
       await i.reply({ content: msg, flags: EPHEMERAL });
     });
   }
 
   private async startGishinAnkiInformationPhase(guild: Guild, game: GameState): Promise<void> {
+    if (this.games.get(game.guildId) !== game) return;
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
 
     await this.sendGishinAnkiStatus(gameChannel, game);
@@ -1056,14 +1125,18 @@ export class GameManager {
     });
 
     let resolvePhase: (() => void) | null = null;
+    let phaseTimeout: NodeJS.Timeout | null = null;
+
+    const finishPhase = () => {
+      if (!resolvePhase) return;
+      collector.stop();
+      if (phaseTimeout) { clearTimeout(phaseTimeout); phaseTimeout = null; }
+      resolvePhase();
+      resolvePhase = null;
+    };
 
     const checkReady = () => {
-      if (!resolvePhase) return;
-      if (game.gishinReady.length >= 2) {
-        collector.stop();
-        resolvePhase();
-        resolvePhase = null;
-      }
+      if (game.gishinReady.length >= game.participants.length) finishPhase();
     };
 
     collector.on("collect", async (i) => {
@@ -1085,7 +1158,7 @@ export class GameManager {
 
     await new Promise<void>((resolve) => {
       resolvePhase = resolve;
-      setTimeout(() => {
+      phaseTimeout = setTimeout(() => {
         collector.stop();
         if (resolvePhase) {
           resolvePhase();
@@ -1095,6 +1168,7 @@ export class GameManager {
       }, 150000);
     });
 
+    if (this.games.get(game.guildId) !== game) return;
     await this.startGishinAnkiDecisionPhase(guild, game);
   }
 
@@ -1128,14 +1202,20 @@ export class GameManager {
   }
 
   private async handleGishinDraw(guild: Guild, game: GameState, i: any, channel: TextChannel): Promise<void> {
+    // 後続の処理で3秒を超える可能性があるため、先に応答を保留する
+    await i.deferReply({ flags: EPHEMERAL });
+    if (this.games.get(game.guildId) !== game || game.phase !== GamePhase.GISHIN_INFORMATION) {
+      await i.editReply({ content: "情報収集フェーズは終了しました。" });
+      return;
+    }
     const pid = i.user.id;
     const tokens = game.gishinActionTokens.get(pid) ?? 0;
     if (tokens <= 0) {
-      await i.reply({ content: "アクションコマが残っていません。", flags: EPHEMERAL });
+      await i.editReply({ content: "アクションコマが残っていません。" });
       return;
     }
     if (game.gishinDeck.length === 0) {
-      await i.reply({ content: "山札にカードが残っていません。", flags: EPHEMERAL });
+      await i.editReply({ content: "山札にカードが残っていません。" });
       return;
     }
 
@@ -1148,29 +1228,35 @@ export class GameManager {
       await member.send(`**山札から引きました:** ${getRoleName(drawn)}`);
     } catch {}
 
-    await i.reply({ content: `山札から1枚引き、手札に加えました。（残りコマ: ${tokens - 1}）`, flags: EPHEMERAL });
+    await i.editReply({ content: `山札から1枚引き、手札に加えました。（残りコマ: ${tokens - 1}）` });
     await this.sendGishinAnkiStatus(channel, game);
   }
 
   private async handleGishinRequest(guild: Guild, game: GameState, i: any, channel: TextChannel): Promise<void> {
+    // 相手の応答を最大30秒待つため、先に応答を保留する
+    await i.deferReply({ flags: EPHEMERAL });
+    if (this.games.get(game.guildId) !== game || game.phase !== GamePhase.GISHIN_INFORMATION) {
+      await i.editReply({ content: "情報収集フェーズは終了しました。" });
+      return;
+    }
     const pid = i.user.id;
     const opponent = game.participants.find((p) => p !== pid)!;
     const tokens = game.gishinActionTokens.get(pid) ?? 0;
 
     const myRole = game.players.get(pid)!.role;
     if (myRole === RoleType.MISANTHROPIST) {
-      await i.reply({ content: "**人間不信**のため、相手にカードを要求できません。", flags: EPHEMERAL });
+      await i.editReply({ content: "**人間不信**のため、相手にカードを要求できません。" });
       return;
     }
 
     if (tokens <= 0) {
-      await i.reply({ content: "アクションコマが残っていません。", flags: EPHEMERAL });
+      await i.editReply({ content: "アクションコマが残っていません。" });
       return;
     }
 
     const myHand = game.gishinHands.get(pid) ?? [];
     if (myHand.length >= 2) {
-      await i.reply({ content: "手札が2枚のため、要求できません。", flags: EPHEMERAL });
+      await i.editReply({ content: "手札が2枚のため、要求できません。" });
       return;
     }
 
@@ -1187,6 +1273,7 @@ export class GameManager {
       accept = false;
       reason = "相手に手札がありません。";
     } else {
+      await i.editReply({ content: "相手にカードを見せるよう要求しました。応答を待っています..." });
       try {
         const oppMember = await guild.members.fetch(opponent);
         const reqMember = await guild.members.fetch(pid);
@@ -1198,23 +1285,35 @@ export class GameManager {
           .setCustomId("gishin_show_card")
           .setPlaceholder("見せるカードを選んでください")
           .addOptions(handOptions);
+        const rejectRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId("gishin_reject_card")
+            .setLabel("拒否する")
+            .setStyle(ButtonStyle.Danger),
+        );
 
         const msg = await oppMember.send({
           content: `**${reqMember.displayName}** があなたの手札を見せてもらうよう要求しています。\n見せるカードを選ぶか、拒否してください。`,
-          components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)],
+          components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select), rejectRow],
         }).catch(() => null);
 
         if (!msg) {
           accept = false;
           reason = "相手にDMを送信できませんでした。";
         } else {
-          const filter2 = (resp: any) => resp.user.id === opponent && resp.customId === "gishin_show_card";
+          const filter2 = (resp: any) =>
+            resp.user.id === opponent &&
+            (resp.customId === "gishin_show_card" || resp.customId === "gishin_reject_card");
           const selectResp = await msg.awaitMessageComponent({ filter: filter2, time: 30000 }).catch(() => null);
 
           if (!selectResp) {
             accept = false;
             reason = "相手が応答しませんでした。";
             await msg.edit({ content: "時間切れです。", components: [] }).catch(() => {});
+          } else if (selectResp.customId === "gishin_reject_card") {
+            accept = false;
+            reason = "相手に拒否されました。（コマは消費されません）";
+            await selectResp.update({ content: "要求を拒否しました。", components: [] });
           } else if (!selectResp.isStringSelectMenu()) {
             accept = false;
             reason = "エラーが発生しました。";
@@ -1239,38 +1338,50 @@ export class GameManager {
       }
     }
 
+    if (this.games.get(game.guildId) !== game || game.phase !== GamePhase.GISHIN_INFORMATION) {
+      await i.editReply({ content: "情報収集フェーズは終了しました。" });
+      return;
+    }
+
     if (accept) {
       game.gishinActionTokens.set(pid, tokens - 1);
-      await i.reply({ content: `相手がカードを見せてくれました。（残りコマ: ${tokens - 1}）`, flags: EPHEMERAL });
+      await i.editReply({ content: `相手がカードを見せてくれました。（残りコマ: ${tokens - 1}）` });
     } else {
       const replyMsg = reason || "相手に拒否されました。（コマは消費されません）";
-      await i.reply({ content: replyMsg, flags: EPHEMERAL });
+      await i.editReply({ content: replyMsg });
     }
 
     await this.sendGishinAnkiStatus(channel, game);
   }
 
   private async startGishinAnkiDecisionPhase(guild: Guild, game: GameState): Promise<void> {
+    if (this.games.get(game.guildId) !== game) return;
     game.phase = GamePhase.GISHIN_DECISION;
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
 
     await gameChannel.send("**決断フェーズ**\n両プレイヤーにDMで決断が送られます。同時に選択してください。");
 
-    for (const pid of game.participants) {
-      await this.sendGishinAnkiDecisionDM(guild, game, pid);
-    }
+    // 両プレイヤーのDMを同時に送る（順番待ちで片方が時間切れになるのを防ぐ）
+    const decisionPromises = game.participants.map((pid) => this.sendGishinAnkiDecisionDM(guild, game, pid));
 
     await new Promise<void>((resolve) => {
-      const checkInterval = setInterval(() => {
-        if (game.gishinDecisions.size >= 2) {
-          clearInterval(checkInterval);
-          resolve();
-        }
+      let settled = false;
+      let checkInterval: NodeJS.Timeout | null = null;
+      let decisionTimeout: NodeJS.Timeout | null = null;
+
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (checkInterval) clearInterval(checkInterval);
+        if (decisionTimeout) clearTimeout(decisionTimeout);
+        resolve();
+      };
+
+      checkInterval = setInterval(() => {
+        if (game.gishinDecisions.size >= game.participants.length) finish();
       }, 500);
 
-      setTimeout(() => {
-        clearInterval(checkInterval);
-
+      decisionTimeout = setTimeout(() => {
         for (const pid of game.participants) {
           if (!game.gishinDecisions.has(pid)) {
             const role = game.players.get(pid)!.role;
@@ -1282,14 +1393,18 @@ export class GameManager {
             gameChannel.send(`<@${pid}> の決断が時間切れのため自動設定されました。`).catch(() => {});
           }
         }
-        resolve();
+        finish();
       }, 60000);
     });
 
+    await Promise.allSettled(decisionPromises);
+
+    if (this.games.get(game.guildId) !== game) return;
     await this.finishGishinAnkiGame(guild, game);
   }
 
   private async sendGishinAnkiDecisionDM(guild: Guild, game: GameState, pid: string): Promise<void> {
+    if (this.games.get(game.guildId) !== game) return;
     const role = game.players.get(pid)!.role;
     let options: string[];
 
@@ -1331,6 +1446,7 @@ export class GameManager {
   }
 
   private async finishGishinAnkiGame(guild: Guild, game: GameState): Promise<void> {
+    if (this.games.get(game.guildId) !== game) return;
     game.phase = GamePhase.FINISHED;
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
 
@@ -1414,8 +1530,6 @@ export class GameManager {
     // One human, one wolf
     const humanDec = isHuman1 ? dec1 : dec2;
     const wolfDec = isWolf1 ? dec1 : dec2;
-    const humanRole = isHuman1 ? role1 : role2;
-    const wolfRole = isWolf1 ? role1 : role2;
 
     if (humanDec === "立ち去る") return { winner1: isHuman1 ? "win" : "lose", winner2: isHuman2 ? "win" : "lose", reason: "人間が「立ち去る」→ 人間の勝利。" };
     if (wolfDec === "見逃す") return { winner1: isHuman1 ? "win" : "lose", winner2: isHuman2 ? "win" : "lose", reason: "人狼が「見逃す」→ 人間の勝利。" };
@@ -1455,10 +1569,10 @@ export class GameManager {
         permissionOverwrites: [{ id: everyone.id, deny: ["ViewChannel"], type: OverwriteType.Role }],
       });
       for (const pid of game.participants) {
-        await gameVoice.permissionOverwrites.create(pid, { ViewChannel: true, Connect: true, Speak: false });
+        await gameVoice.permissionOverwrites.create(pid, { ViewChannel: true, Connect: true });
         try {
           const member = await guild.members.fetch(pid);
-          if (member.voice.channelId === waitingVC.id) await member.voice.setChannel(gameVoice);
+          if (member.voice.channelId) await member.voice.setChannel(gameVoice);
         } catch {}
       }
     } else {
@@ -1467,10 +1581,16 @@ export class GameManager {
         permissionOverwrites: [
           { id: everyone.id, deny: ["ViewChannel"], type: OverwriteType.Role },
           ...game.participants.map((pid) => ({
-            id: pid, allow: ["ViewChannel", "Connect"] as const, deny: ["Speak"] as const, type: OverwriteType.Member as const,
+            id: pid, allow: ["ViewChannel", "Connect"] as const, type: OverwriteType.Member as const,
           })),
         ],
       });
+      for (const pid of game.participants) {
+        try {
+          const member = await guild.members.fetch(pid);
+          if (member.voice.channelId) await member.voice.setChannel(gameVoice);
+        } catch {}
+      }
     }
 
     const werewolfText = await guild.channels.create({
@@ -1516,6 +1636,7 @@ export class GameManager {
   }
 
   private async startDayDiscussion(guild: Guild, game: GameState): Promise<void> {
+    if (this.games.get(game.guildId) !== game) return;
     game.phase = GamePhase.DAY_DISCUSSION;
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
 
@@ -1554,6 +1675,7 @@ export class GameManager {
   }
 
   private async startVoting(guild: Guild, game: GameState): Promise<void> {
+    if (this.games.get(game.guildId) !== game) return;
     log(guild.id, `Day ${game.dayCount} discussion started (${game.settings.meetingTimeMinutes}min)`);
     if (game.phase !== GamePhase.DAY_DISCUSSION) return;
     game.phase = GamePhase.DAY_VOTING;
@@ -1562,6 +1684,7 @@ export class GameManager {
 
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     const alivePlayers = game.participants.filter((p) => game.players.get(p)?.isAlive);
+    const voteNames = await this.resolveDisplayNames(guild, alivePlayers);
 
     const embed = new EmbedBuilder()
       .setTitle(`投票時間 - ${game.dayCount}日目`)
@@ -1588,8 +1711,6 @@ export class GameManager {
         voteResolve = null;
       }
     };
-
-    const voteNames = await this.resolveDisplayNames(guild, alivePlayers);
 
     collector.on("collect", async (i) => {
       if (i.customId === "vote_open") {
@@ -1639,6 +1760,7 @@ export class GameManager {
   }
 
   private async processVotingResults(guild: Guild, game: GameState): Promise<void> {
+    if (this.games.get(game.guildId) !== game) return;
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     const alivePlayers = game.participants.filter((p) => game.players.get(p)?.isAlive);
 
@@ -1800,12 +1922,12 @@ export class GameManager {
     );
     await gameChannel.send({ content: `**決選投票**\n候補: ${candidates.map((id) => `<@${id}>`).join(", ")}\n下のボタンをクリックしてください。`, components: [row] });
 
+    const runoffCandidateNames = await this.resolveDisplayNames(guild, candidates);
+
     const collector = gameChannel.createMessageComponentCollector({
       filter: (i) => i.customId === "runoff_open" && alivePlayers.includes(i.user.id),
       time: 30000,
     });
-
-    const runoffCandidateNames = await this.resolveDisplayNames(guild, candidates);
 
     collector.on("collect", async (i) => {
       const current = game.votes.get(i.user.id);
@@ -1915,6 +2037,7 @@ export class GameManager {
   }
 
   private async startNight(guild: Guild, game: GameState): Promise<void> {
+    if (this.games.get(game.guildId) !== game) return;
     game.phase = GamePhase.NIGHT;
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     const gameVoice = guild.channels.cache.get(game.gameVoiceChannelId!) as VoiceChannel;
@@ -1935,8 +2058,10 @@ export class GameManager {
     const wwChannel = game.werewolfTextChannelId
       ? (guild.channels.cache.get(game.werewolfTextChannelId) as TextChannel | undefined) : undefined;
     if (wwChannel) {
-      const werewolfIds = game.participants.filter((p) => game.players.get(p)?.role === RoleType.WEREWOLF && game.players.get(p)?.isAlive);
-      for (const wid of werewolfIds) await wwChannel.permissionOverwrites.edit(wid, { SendMessages: true });
+      const werewolfIds = game.participants.filter((p) => game.players.get(p)?.role === RoleType.WEREWOLF);
+      for (const wid of werewolfIds) {
+        await wwChannel.permissionOverwrites.edit(wid, { SendMessages: game.players.get(wid)?.isAlive === true });
+      }
       await wwChannel.send(`**夜になりました。** 襲撃する相手を相談してください。`);
     }
 
@@ -1980,9 +2105,11 @@ export class GameManager {
     });
 
     btnCollector.on("collect", async (i) => {
+      // 対象の表示名取得などで3秒を超える可能性があるため、先に応答を保留する
+      await i.deferReply({ flags: EPHEMERAL });
       const info = this.getNightActionInfo(game.guildId, i.user.id);
       if (typeof info === "string") {
-        await i.reply({ content: info, flags: EPHEMERAL });
+        await i.editReply({ content: info });
         return;
       }
 
@@ -1998,10 +2125,9 @@ export class GameManager {
             .setValue(t)
         ));
 
-      await i.reply({
+      await i.editReply({
         content: `**${getRoleName(role)}:** 対象を選んでください。`,
         components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)],
-        flags: EPHEMERAL,
       });
     });
 
@@ -2019,12 +2145,12 @@ export class GameManager {
     const tryResolveNight = () => {
       if (!nightResolve) return;
       const actedUsers = new Set(game.nightActionResult.map((a) => a.split(":")[1]));
-      const allDone = nightRolePlayers.every((pid) => {
-        const r = game.players.get(pid)?.role;
-        if (r === RoleType.WEREWOLF) return actedUsers.has(pid);
-        return actedUsers.has(pid);
-      });
-      if (allDone) { nightResolve(); nightResolve = null; }
+      const allDone = nightRolePlayers.every((pid) => actedUsers.has(pid));
+      if (allDone) {
+        if (game.nightActionTimeout) { clearTimeout(game.nightActionTimeout); game.nightActionTimeout = null; }
+        nightResolve();
+        nightResolve = null;
+      }
     };
 
     selectCollector.on("collect", async (i) => {
@@ -2078,7 +2204,11 @@ export class GameManager {
 
     const isOneNight = game.settings.gameMode === GameMode.ONENIGHT;
     const isGishin = game.settings.gameMode === GameMode.GISHINANKI;
-    const def = isGishin ? (GISHINANKI_ROLE_DEFINITIONS[player.role] ?? ROLE_DEFINITIONS[player.role]) : ROLE_DEFINITIONS[player.role];
+    const def = isGishin
+      ? (GISHINANKI_ROLE_DEFINITIONS[player.role] ?? ROLE_DEFINITIONS[player.role])
+      : isOneNight
+        ? (ONENIGHT_ROLE_DEFINITIONS[player.role] ?? ROLE_DEFINITIONS[player.role])
+        : ROLE_DEFINITIONS[player.role];
     const werewolfIds = game.participants.filter((p) => game.players.get(p)?.role === RoleType.WEREWOLF);
     const fanaticIds = game.participants.filter((p) => game.players.get(p)?.role === RoleType.FANATIC);
 
@@ -2150,6 +2280,8 @@ export class GameManager {
         game.nightActionResult.push(`${role}:${userId}:${targetId}`);
       }
     } else {
+      const alreadyActed = game.nightActionResult.some((a) => a.startsWith(`${role}:${userId}:`));
+      if (alreadyActed) return "すでにアクションは完了しています。";
       game.nightActionResult.push(`${role}:${userId}:${targetId}`);
     }
 
@@ -2193,12 +2325,13 @@ export class GameManager {
   }
 
   private async finalizeNight(guild: Guild, game: GameState): Promise<void> {
+    if (this.games.get(game.guildId) !== game) return;
     const gameChannel = guild.channels.cache.get(game.gameTextChannelId!) as TextChannel;
     const wwChannel = game.werewolfTextChannelId
       ? (guild.channels.cache.get(game.werewolfTextChannelId) as TextChannel | undefined) : undefined;
 
     if (wwChannel) {
-      const werewolfIds = game.participants.filter((p) => game.players.get(p)?.role === RoleType.WEREWOLF && game.players.get(p)?.isAlive);
+      const werewolfIds = game.participants.filter((p) => game.players.get(p)?.role === RoleType.WEREWOLF);
       for (const wid of werewolfIds) await wwChannel.permissionOverwrites.edit(wid, { SendMessages: false });
     }
 
@@ -2241,6 +2374,19 @@ export class GameManager {
       }
     } else {
       await gameChannel.send("昨夜は誰も襲撃されませんでした。");
+    }
+
+    // 妖狐は占われると死亡する
+    const divinedFoxIds = new Set<string>();
+    for (const action of game.nightActionResult.filter((a) => a.startsWith("fortune_teller:"))) {
+      const tid = action.split(":")[2];
+      const target = game.players.get(tid);
+      if (target && target.role === RoleType.FOX && target.isAlive) divinedFoxIds.add(tid);
+    }
+    for (const foxId of divinedFoxIds) {
+      game.players.get(foxId)!.isAlive = false;
+      await this.handlePlayerDeath(guild, game, foxId);
+      await gameChannel.send(`**<@${foxId}>** が昨夜、占いにより死亡しました。`);
     }
 
     for (const [, ps] of game.players) ps.isProtected = false;
@@ -2308,10 +2454,11 @@ export class GameManager {
     if (game.gameTextChannelId) {
       const gtch = guild.channels.cache.get(game.gameTextChannelId) as TextChannel | undefined;
       if (gtch) {
-        for (const [, ow] of gtch.permissionOverwrites.cache) {
-          if (ow.type === OverwriteType.Member) {
-            try { await ow.delete(); } catch {}
-          }
+        const memberOverwriteIds = [...gtch.permissionOverwrites.cache.values()]
+          .filter((ow) => ow.type === OverwriteType.Member)
+          .map((ow) => ow.id);
+        for (const id of memberOverwriteIds) {
+          try { await gtch.permissionOverwrites.delete(id); } catch {}
         }
       }
     }
@@ -2361,7 +2508,7 @@ export class GameManager {
   }
 
   getSettingStatus(guildId: string, userId: string): string {
-    const game = this.games.get(guildId);
+    const game = this.ensureGame(guildId);
     if (!game) return "設定がまだ行われていません。";
     if (game.hostUserId !== userId) return "ホストのみが設定を確認できます。";
     const dist = game.settings.roleDistribution;
@@ -2392,7 +2539,10 @@ export class GameManager {
 
     if (args === "classic_roles") {
       let msg = "**=== 通常人狼 役職一覧 ===**\n\n";
-      const exclude = new Set([RoleType.ROBBER, RoleType.TROUBLEMAKER, RoleType.DRUNK, RoleType.INSOMNIAC, RoleType.HUNTER_ONENIGHT, RoleType.TANNER]);
+      const exclude = new Set([
+        RoleType.ROBBER, RoleType.TROUBLEMAKER, RoleType.DRUNK, RoleType.INSOMNIAC, RoleType.HUNTER_ONENIGHT, RoleType.TANNER,
+        RoleType.SURVIVOR, RoleType.MISANTHROPIST, RoleType.WEREWOLF_GISHIN, RoleType.GHOST, RoleType.FOOL,
+      ]);
       for (const def of Object.values(ROLE_DEFINITIONS)) {
         if (exclude.has(def.type)) continue;
         msg += `**${def.name}** (${def.team === Team.VILLAGER ? "市民陣営" : def.team === Team.WEREWOLF ? "人狼陣営" : "第三陣営"})\n${def.description}\n勝利条件: ${def.winCondition}\n\n`;
@@ -2580,6 +2730,7 @@ export class GameManager {
         if (ch) { try { await ch.delete(); } catch {} }
       }
       if (game.meetingTimer) clearTimeout(game.meetingTimer);
+      if (game.nightActionTimeout) clearTimeout(game.nightActionTimeout);
       this.deleteGame(guildId);
       return;
     }
@@ -2630,6 +2781,18 @@ export class GameManager {
   }
 
   loadSettings(guildId: string): { participants: string[]; settings: GameSettings } | null {
+    const game = this.games.get(guildId);
+    if (game) {
+      return {
+        participants: [...game.participants],
+        settings: {
+          gameMode: game.settings.gameMode,
+          meetingTimeMinutes: game.settings.meetingTimeMinutes,
+          roleDistribution: { ...game.settings.roleDistribution },
+          anonymousVoting: game.settings.anonymousVoting,
+        },
+      };
+    }
     const persisted = this.persistence.getSettings(guildId);
     if (!persisted) return null;
     return {
@@ -2662,9 +2825,19 @@ export class GameManager {
     for (const gid of this.getActiveGameGuildIds()) {
       const game = this.games.get(gid)!;
       if (game.waitingVoiceChannelId === channelId && !game.participants.includes(memberId)) {
+        const gameGuild = this.client.guilds.cache.get(gid) ?? guild;
         try {
-          const member = await guild.members.fetch(memberId);
+          const member = await gameGuild.members.fetch(memberId);
           await member.voice.setMute(true);
+          // 途中から観戦に加わった人にも観戦用チャンネルを見せる
+          if (game.spectatorTextChannelId) {
+            const specCh = gameGuild.channels.cache.get(game.spectatorTextChannelId) as TextChannel | undefined;
+            if (specCh) {
+              await specCh.permissionOverwrites
+                .create(memberId, { ViewChannel: true, SendMessages: true })
+                .catch(() => {});
+            }
+          }
           console.log(`[Game ${gid.slice(0, 8)}] Server-muted spectator ${memberId} in waiting VC`);
         } catch {}
       }

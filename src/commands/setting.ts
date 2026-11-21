@@ -6,13 +6,11 @@ import {
   ButtonStyle,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
-  ComponentType,
   EmbedBuilder,
-  GuildMember,
   MessageComponentInteraction,
 } from "discord.js";
 import { GameManager } from "../game/GameManager";
-import { GameMode, RoleType } from "../game/types";
+import { GameMode, GamePhase, RoleType } from "../game/types";
 
 const EPHEMERAL = 64;
 
@@ -99,6 +97,18 @@ function parseMentions(raw: string): string[] {
 }
 
 export async function execute(interaction: ChatInputCommandInteraction, gameManager: GameManager) {
+  const existing = gameManager.getGame(interaction.guildId!);
+  if (existing) {
+    if (existing.phase !== GamePhase.WAITING) {
+      await interaction.reply({ content: "ゲームが進行中のため設定を変更できません。", flags: EPHEMERAL });
+      return;
+    }
+    if (existing.hostUserId !== interaction.user.id) {
+      await interaction.reply({ content: "ホストのみが設定を変更できます。", flags: EPHEMERAL });
+      return;
+    }
+  }
+
   const participantsRaw = interaction.options.getString("参加者");
   if (participantsRaw) {
     await executeWithArgs(interaction, gameManager, participantsRaw);
@@ -113,7 +123,7 @@ async function executeWithArgs(
   gameManager: GameManager,
   participantsRaw: string,
 ) {
-  const participantIds = parseMentions(participantsRaw);
+  const participantIds = [...new Set(parseMentions(participantsRaw))];
 
   const modeStr = interaction.options.getString("ゲームモード") ?? "classic";
   const gameMode: GameMode = modeStr === "oneten" ? GameMode.ONENIGHT : modeStr === "gishinanki" ? GameMode.GISHINANKI : GameMode.CLASSIC;
@@ -153,9 +163,15 @@ async function executeWithArgs(
     for (const [k, v] of Object.entries(roleDistribution)) {
       if (v === 0) delete roleDistribution[k as unknown as keyof typeof roleDistribution];
     }
+  } else if (gameMode === GameMode.ONENIGHT) {
+    // ワンナイトでも最低限の役職を引数から反映する（残りは市民で埋まる）
+    roleDistribution = {
+      [RoleType.WEREWOLF]: optOrDefault("人狼", 1),
+      [RoleType.FORTUNE_TELLER]: optOrDefault("占い師", 1),
+    };
   }
 
-  await gameManager.setSetting(
+  const result = await gameManager.setSetting(
     interaction.guildId!,
     interaction.user.id,
     participantIds,
@@ -164,6 +180,11 @@ async function executeWithArgs(
     anonymousVoting,
     gameMode,
   );
+
+  if (!result.startsWith("設定が完了")) {
+    await interaction.editReply(result);
+    return;
+  }
 
   const modeName = gameMode === GameMode.CLASSIC ? "通常人狼" : gameMode === GameMode.ONENIGHT ? "ワンナイト人狼" : "ギシンアンキ";
 
@@ -176,7 +197,10 @@ async function executeWithArgs(
       `妖狐: ${opt("妖狐")} / 占い師: ${optOrDefault("占い師", 1)} / 霊媒師: ${opt("霊媒師")} / 騎士: ${opt("騎士")}\n` +
       `てるてる坊主: ${opt("てるてる坊主")} / 猫又: ${opt("猫又")} / 黒猫: ${opt("黒猫")}\n`;
   } else {
-    detail = `参加者: ${participantIds.length}人\n`;
+    detail =
+      `参加者: ${participantIds.length}人\n` +
+      `人狼: ${optOrDefault("人狼", 1)} / 占い師: ${optOrDefault("占い師", 1)}\n` +
+      `※その他の役職は引数なしの /setting (対話モード) で設定してください。\n`;
   }
 
   const s =
@@ -215,8 +239,12 @@ async function executeInteractive(interaction: ChatInputCommandInteraction, game
   let running = true;
   while (running) {
     await render(interaction, state);
-    const ci = await waitForAction(interaction, state, userId);
-    if (!ci) { running = false; break; }
+    const ci = await waitForAction(interaction, userId);
+    if (!ci) {
+      await interaction.editReply({ content: "設定パネルを終了しました。", embeds: [], components: [] }).catch(() => {});
+      running = false;
+      break;
+    }
 
     switch (state.page) {
       case "main":
@@ -306,6 +334,17 @@ async function render(interaction: ChatInputCommandInteraction, state: Interacti
     const guild = interaction.guild!;
     const members = [...guild.members.cache.values()].filter((m) => !m.user.bot).slice(0, 25);
     const minPlayers = state.gameMode === GameMode.CLASSIC ? 4 : state.gameMode === GameMode.ONENIGHT ? 3 : 2;
+    const back = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId("back").setLabel("戻る").setStyle(ButtonStyle.Secondary),
+    );
+    if (members.length < minPlayers) {
+      await interaction.editReply({
+        content: `サーバー内のメンバーが${members.length}人しかいないため、最低${minPlayers}人を選べません。`,
+        embeds: [],
+        components: [back],
+      });
+      return;
+    }
     const select = new StringSelectMenuBuilder()
       .setCustomId("pick")
       .setPlaceholder(`参加者を選んでください（最低${minPlayers}人）`)
@@ -316,9 +355,6 @@ async function render(interaction: ChatInputCommandInteraction, state: Interacti
           new StringSelectMenuOptionBuilder().setLabel(m.displayName).setValue(m.id).setDescription(`@${m.user.username}`)
         )
       );
-    const back = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId("back").setLabel("戻る").setStyle(ButtonStyle.Secondary),
-    );
     await interaction.editReply({ content: `参加者を選んでください（最低${minPlayers}人）`, embeds: [], components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select), back] });
   } else if (state.page === "select_role") {
     const options = getRoleOptions(state.gameMode);
@@ -360,11 +396,12 @@ async function render(interaction: ChatInputCommandInteraction, state: Interacti
 
 async function waitForAction(
   interaction: ChatInputCommandInteraction,
-  state: InteractiveState,
   userId: string,
 ): Promise<MessageComponentInteraction | null> {
   try {
-    const ci = await interaction.channel?.awaitMessageComponent({
+    // チャンネル全体ではなく、この設定パネルのメッセージだけを待つ
+    const panel = await interaction.fetchReply();
+    const ci = await panel.awaitMessageComponent({
       filter: (i: any) => i.user.id === userId,
       time: 120000,
     });
@@ -409,12 +446,18 @@ async function handleMainAction(
         roleDistribution, state.meetingMinutes, state.anonymousVoting, state.gameMode,
       );
       const modeName = getModeName(state.gameMode);
-      await ci.editReply({ content: `**設定完了**\nモード: ${modeName}\n${result}`, embeds: [], components: [] });
+      if (result.startsWith("設定が完了")) {
+        await ci.editReply({ content: `**設定完了**\nモード: ${modeName}\n${result}`, embeds: [], components: [] });
+        return false;
+      }
+      // 設定エラー時はパネルを維持し、ホストが修正できるようにする
+      await ci.followUp({ content: result, flags: EPHEMERAL });
+      return true;
     } catch (e) {
       console.error("Save error:", e);
       await ci.editReply({ content: "設定の保存中にエラーが発生しました。", embeds: [], components: [] }).catch(() => {});
+      return false;
     }
-    return false;
   }
 
   if (ci.customId === "toggle_anonymous") {
@@ -466,8 +509,13 @@ async function handleRolePick(ci: MessageComponentInteraction, state: Interactiv
 }
 
 async function handleRoleAdjust(ci: MessageComponentInteraction, state: InteractiveState, userId: string) {
-  const key = state.selectedRoleKey!;
-  const current = state.roleCounts[key];
+  const key = state.selectedRoleKey;
+  if (!key) {
+    state.page = "select_role";
+    await ci.deferUpdate();
+    return;
+  }
+  const current = state.roleCounts[key] ?? 0;
 
   if (ci.customId === "back") {
     state.page = "select_role";
